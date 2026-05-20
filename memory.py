@@ -4,8 +4,8 @@ from openai import AsyncOpenAI
 from database import get_memories, save_memory
 
 client = AsyncOpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com"
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1"
 )
 
 
@@ -35,7 +35,7 @@ async def extract_memories(user_id: int, conversation: list[dict]):
 
     try:
         response = await client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek/deepseek-v4-flash:free",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
             temperature=0.1

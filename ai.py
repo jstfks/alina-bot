@@ -5,8 +5,8 @@ from persona import ALINA
 from memory import build_memory_prompt
 
 client = AsyncOpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com"
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1"
 )
 
 
@@ -83,7 +83,7 @@ async def get_ai_response(
 
     try:
         response = await client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek/deepseek-v4-flash:free",
             messages=messages,
             max_tokens=250,
             temperature=0.82,
@@ -133,7 +133,7 @@ async def generate_reengagement_message(
 
     try:
         response = await client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek/deepseek-v4-flash:free",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=80,
             temperature=0.9
