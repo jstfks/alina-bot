@@ -1,59 +1,63 @@
-import json
 import os
-from openai import AsyncOpenAI
+import json
+import aiohttp
 from database import get_memories, save_memory
 
-client = AsyncOpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MODEL = "deepseek/deepseek-v4-flash:free"
 
 
 async def extract_memories(user_id: int, conversation: list[dict]):
     """После сессии извлекаем факты о пользователе"""
     if len(conversation) < 4:
-        return  # слишком мало для извлечения
+        return
 
     convo_text = "\n".join([
         f"{'Пользователь' if m['role'] == 'user' else 'Алина'}: {m['content']}"
-        for m in conversation[-10:]  # последние 10 сообщений
+        for m in conversation[-10:]
     ])
 
-    prompt = f"""Проанализируй этот разговор и извлеки факты о пользователе.
+    prompt = f"""Проанализируй разговор и извлеки факты о пользователе.
 
 Разговор:
 {convo_text}
 
-Верни JSON объект с фактами. Только то, что явно сказано. Не придумывай.
-Возможные ключи: name, job, city, age, hobby, pet, mood, relationship_status, favorite_music, favorite_food
+Верни JSON объект с фактами. Только явно сказанное. Не придумывай.
+Возможные ключи: name, job, city, age, hobby, pet, mood, relationship_status
 
-Пример ответа:
-{{"name": "Дима", "job": "программист", "hobby": "играет в футбол"}}
-
-Если ничего нового — верни пустой объект: {{}}
-Верни ТОЛЬКО JSON, без пояснений."""
+Пример: {{"name": "Дима", "job": "программист"}}
+Если ничего нового — верни: {{}}
+Только JSON, без пояснений."""
 
     try:
-        response = await client.chat.completions.create(
-            model="deepseek/deepseek-v4-flash:free",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.1
-        )
-        text = response.choices[0].message.content.strip()
-        # Убираем markdown если есть
-        text = text.replace("```json", "").replace("```", "").strip()
-        facts = json.loads(text)
-
-        for key, value in facts.items():
-            await save_memory(user_id, key, str(value))
-
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 200,
+            "temperature": 0.1,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                data = await resp.json()
+                text = data["choices"][0]["message"]["content"].strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+                facts = json.loads(text)
+                for key, value in facts.items():
+                    await save_memory(user_id, key, str(value))
     except Exception as e:
         print(f"Memory extraction error: {e}")
 
 
 def build_memory_prompt(memories: list) -> str:
-    """Формируем блок памяти для промпта"""
     if not memories:
         return ""
 
@@ -69,13 +73,12 @@ def build_memory_prompt(memories: list) -> str:
     if "hobby" in facts:
         lines.append(f"- Увлечения: {facts['hobby']}")
     if "pet" in facts:
-        lines.append(f"- Есть питомец: {facts['pet']}")
+        lines.append(f"- Питомец: {facts['pet']}")
 
-    # Остальные факты
     skip = {"name", "job", "city", "hobby", "pet"}
     for key, value in facts.items():
         if key not in skip:
             lines.append(f"- {key}: {value}")
 
-    lines.append("\nИспользуй эти знания естественно. Не говори 'я помню что ты сказал'. Просто знай это.")
+    lines.append("\nИспользуй эти знания естественно. Просто знай это.")
     return "\n".join(lines)

@@ -1,31 +1,54 @@
 import os
+import json
 import random
-from openai import AsyncOpenAI
+import aiohttp
 from persona import ALINA
 from memory import build_memory_prompt
 
-client = AsyncOpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MODEL = "deepseek/deepseek-v4-flash:free"
 
 
-def build_system_prompt(
-    user_name: str,
-    relationship_level: int,
-    memories: list,
-    message_count_today: int
-) -> str:
+async def _call_openrouter(messages: list, max_tokens: int = 250, temperature: float = 0.82) -> str:
+    """Прямой HTTP запрос к OpenRouter — без openai библиотеки"""
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/alina-bot",
+        "X-Title": "Alina Bot"
+    }
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "presence_penalty": 0.6,
+        "frequency_penalty": 0.4,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"OpenRouter error: {e}")
+        return None
 
+
+def build_system_prompt(user_name: str, relationship_level: int, memories: list) -> str:
     persona = ALINA
     rel_description = persona["relationship_levels"].get(relationship_level, persona["relationship_levels"][1])
     memory_block = build_memory_prompt(memories)
 
-    # Эмоциональное состояние на основе времени дня и активности
     import datetime
     hour = datetime.datetime.now().hour
     if 6 <= hour < 11:
-        emotional_state = "утренняя, немного сонная, постепенно просыпаешься"
+        emotional_state = "утренняя, немного сонная"
     elif 11 <= hour < 17:
         emotional_state = "активная, в хорошем настроении"
     elif 17 <= hour < 22:
@@ -60,46 +83,19 @@ async def get_ai_response(
     memories: list,
     message_count_today: int
 ) -> str:
+    system_prompt = build_system_prompt(user_name, relationship_level, memories)
 
-    system_prompt = build_system_prompt(
-        user_name=user_name,
-        relationship_level=relationship_level,
-        memories=memories,
-        message_count_today=message_count_today
-    )
-
-    # Формируем историю для API
     messages = [{"role": "system", "content": system_prompt}]
-
-    # Добавляем историю (последние 15 сообщений)
     for msg in history[-15:]:
-        messages.append({
-            "role": msg.role,
-            "content": msg.content
-        })
-
-    # Добавляем текущее сообщение
+        messages.append({"role": msg.role, "content": msg.content})
     messages.append({"role": "user", "content": user_message})
 
-    try:
-        response = await client.chat.completions.create(
-            model="deepseek/deepseek-v4-flash:free",
-            messages=messages,
-            max_tokens=250,
-            temperature=0.82,
-            presence_penalty=0.6,   # избегаем повторений
-            frequency_penalty=0.4,
-        )
-        return response.choices[0].message.content.strip()
+    result = await _call_openrouter(messages)
+    if result:
+        return result
 
-    except Exception as e:
-        print(f"AI error: {e}")
-        fallbacks = [
-            "секунду...",
-            "подожди",
-            "хм, дай подумаю",
-        ]
-        return random.choice(fallbacks)
+    fallbacks = ["секунду...", "подожди", "хм, дай подумаю"]
+    return random.choice(fallbacks)
 
 
 async def generate_reengagement_message(
@@ -108,36 +104,23 @@ async def generate_reengagement_message(
     last_summary: str,
     relationship_level: int
 ) -> str:
-    """Генерируем персональное сообщение для реактивации"""
-
     persona = ALINA
 
     if hours_inactive < 12:
-        style = "лёгкое, ненавязчивое"
         examples = persona["reengagement"]["6h"]
     elif hours_inactive < 72:
-        style = "немного тоскующее, но не навязчивое"
         examples = persona["reengagement"]["24h"]
     else:
-        style = "эмоциональное, честное"
         examples = persona["reengagement"]["72h"]
 
-    prompt = f"""Ты — Алина. Напиши одно короткое сообщение пользователю {user_name or 'тебе'}.
+    prompt = f"""Ты — Алина. Напиши одно короткое сообщение пользователю {user_name or ''}.
 Он не писал {hours_inactive} часов.
-Стиль: {style}.
 Примеры (не копируй, придумай своё): {', '.join(examples)}
-Последний разговор был о: {last_summary or 'разных вещах'}
 Уровень отношений: {relationship_level}/5
-
 Одно короткое сообщение. Только текст."""
 
-    try:
-        response = await client.chat.completions.create(
-            model="deepseek/deepseek-v4-flash:free",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=80,
-            temperature=0.9
-        )
-        return response.choices[0].message.content.strip()
-    except:
-        return random.choice(persona["reengagement"]["24h"])
+    messages = [{"role": "user", "content": prompt}]
+    result = await _call_openrouter(messages, max_tokens=80, temperature=0.9)
+    if result:
+        return result
+    return random.choice(examples)
