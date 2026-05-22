@@ -5,10 +5,18 @@ from persona import ALINA
 from memory import build_memory_prompt
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "deepseek/deepseek-v4-flash:free"
+
+# Список моделей по приоритету — переключается автоматически при ошибке
+MODELS = [
+    "deepseek/deepseek-v4-flash:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+]
 
 
-async def _call_openrouter(messages: list, max_tokens: int = 250, temperature: float = 0.82) -> str:
+async def _call_model(model: str, messages: list, max_tokens: int, temperature: float) -> str | None:
+    """Один запрос к конкретной модели. Возвращает текст или None."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -16,7 +24,7 @@ async def _call_openrouter(messages: list, max_tokens: int = 250, temperature: f
         "X-Title": "Alina Bot"
     }
     payload = {
-        "model": MODEL,
+        "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -32,14 +40,33 @@ async def _call_openrouter(messages: list, max_tokens: int = 250, temperature: f
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
                 data = await resp.json()
-                # Логируем полный ответ если нет choices
+
                 if "choices" not in data:
-                    print(f"OpenRouter full response: {data}")
+                    error_code = data.get("error", {}).get("code", "unknown")
+                    print(f"Model {model} failed (code {error_code})")
                     return None
+
                 return data["choices"][0]["message"]["content"].strip()
+
     except Exception as e:
-        print(f"OpenRouter exception: {e}")
+        print(f"Model {model} exception: {e}")
         return None
+
+
+async def _call_openrouter(messages: list, max_tokens: int = 250, temperature: float = 0.82) -> str | None:
+    """Перебирает модели по списку пока одна не ответит."""
+    for model in MODELS:
+        result = await _call_model(model, messages, max_tokens, temperature)
+        if result:
+            if model != MODELS[0]:
+                print(f"Fallback success: используется {model}")
+            return result
+        # Небольшая пауза перед следующей попыткой
+        import asyncio
+        await asyncio.sleep(0.5)
+
+    print("Все модели недоступны")
+    return None
 
 
 def build_system_prompt(user_name: str, relationship_level: int, memories: list) -> str:
@@ -96,7 +123,7 @@ async def get_ai_response(
     if result:
         return result
 
-    fallbacks = ["секунду...", "подожди", "хм, дай подумаю"]
+    fallbacks = ["секунду...", "подожди немного", "хм, дай подумаю"]
     return random.choice(fallbacks)
 
 
