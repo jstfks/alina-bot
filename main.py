@@ -79,6 +79,7 @@ async def pay_week(message: Message):
         title="7 дней Premium",
         description="Безлимитные сообщения, полная память, приоритет",
         payload="sub_week",
+        provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label="7 дней", amount=300)]
     )
@@ -90,6 +91,7 @@ async def pay_month(message: Message):
         title="30 дней Premium",
         description="Безлимитные сообщения, полная память, приоритет",
         payload="sub_month",
+        provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label="30 дней", amount=1100)]
     )
