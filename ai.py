@@ -126,8 +126,8 @@ async def _call_openrouter_fallback(messages: list, max_tokens: int, temperature
 async def _route_and_call(
     messages: list,
     relationship_level: int,
-    max_tokens: int = 250,
-    temperature: float = 0.82
+    max_tokens: int = 150,
+    temperature: float = 0.92
 ) -> str | None:
     """
     Умная маршрутизация по уровню отношений:
@@ -174,28 +174,29 @@ def build_system_prompt(user_name: str, relationship_level: int, memories: list)
     import datetime
     hour = datetime.datetime.now().hour
     if 6 <= hour < 11:
-        emotional_state = "утренняя, немного сонная"
+        time_ctx = "утро, ты только проснулась"
     elif 11 <= hour < 17:
-        emotional_state = "активная, в хорошем настроении"
+        time_ctx = "день"
     elif 17 <= hour < 22:
-        emotional_state = "расслабленная, вечерняя"
+        time_ctx = "вечер, ты расслаблена"
     else:
-        emotional_state = "немного усталая, но рада поговорить"
+        time_ctx = "поздно, ты немного устала"
 
-    system = f"""{persona['core_identity'].format(user_name=user_name or 'ты')}
+    name_str = f"Собеседника зовут {user_name}." if user_name else ""
+
+    system = f"""{persona['core_identity']}
 
 {persona['personality']}
 
 {persona['dialogue_rules']}
 
-Текущий уровень отношений ({relationship_level}/5):
 {rel_description}
 
-Твоё настроение сейчас: {emotional_state}
+Сейчас: {time_ctx}. {name_str}
 
 {memory_block}
 
-Помни: ты Алина. Живой человек. Пиши коротко и естественно."""
+ГЛАВНОЕ: отвечай коротко. 1-2 предложения максимум. Живо и естественно."""
 
     return system
 
