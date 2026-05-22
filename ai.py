@@ -1,4 +1,4 @@
-import os
+﻿import os
 import random
 import aiohttp
 from persona import ALINA
@@ -9,6 +9,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Список моделей по приоритету — переключается автоматически при ошибке
 MODELS = [
     "deepseek/deepseek-v4-flash:free",
+    "deepseek/deepseek-chat-v3-0324:free",
     "deepseek/deepseek-r1:free",
     "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
     "qwen/qwen3-235b-a22b:free",
@@ -153,3 +154,4 @@ async def generate_reengagement_message(
     messages = [{"role": "user", "content": prompt}]
     result = await _call_openrouter(messages, max_tokens=80, temperature=0.9)
     return result or random.choice(examples)
+
