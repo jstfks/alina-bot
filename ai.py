@@ -216,7 +216,21 @@ async def _route_and_call(
     return await _call_openrouter_fallback(messages, max_tokens, temperature)
 
 
-def build_system_prompt(user_name: str, relationship_level: int, memories: list, user_timezone_offset: int = 3) -> str:
+def build_context_summary(history_before: list) -> str:
+    """Сжатое резюме старых сообщений для контекста"""
+    if not history_before:
+        return ""
+    topics = []
+    for msg in history_before:
+        if msg.role == "user" and len(msg.content) > 20:
+            topics.append(msg.content[:60])
+    if not topics:
+        return ""
+    summary = "Из предыдущих разговоров ты знаешь: " + "; ".join(topics[-5:])
+    return summary
+
+
+def build_system_prompt(user_name: str, relationship_level: int, memories: list, user_timezone_offset: int = 3, history_summary: str = "") -> str:
     persona = ALINA
     rel_description = persona["relationship_levels"].get(
         relationship_level, persona["relationship_levels"][1]
@@ -243,6 +257,7 @@ def build_system_prompt(user_name: str, relationship_level: int, memories: list,
         time_ctx = f"ночь, {time_str}, {day_name}"
 
     name_str = f"Его зовут {user_name}." if user_name else ""
+    summary_str = ("\n" + history_summary) if history_summary else ""
 
     system = f"""{persona['core_identity']}
 
@@ -253,12 +268,11 @@ def build_system_prompt(user_name: str, relationship_level: int, memories: list,
 {rel_description}
 
 Сейчас у него: {time_ctx}. {name_str}
-Ты живёшь в том же городе что и он — реагируй на время естественно, как живой человек.
-Не упоминай время и день недели без причины — только если это уместно в разговоре.
+Не упоминай время и день недели без причины — только если уместно.{summary_str}
 
 {memory_block}
 
-ГЛАВНОЕ: отвечай коротко. 1-2 предложения. Живо, по-женски, естественно."""
+ГЛАВНОЕ: отвечай коротко. 1-2 предложения. Живо, по-взрослому, естественно."""
 
     return system
 
@@ -275,10 +289,16 @@ async def get_ai_response(
 ) -> str:
     # Ограничиваем уровень для бесплатных пользователей
     effective_level = relationship_level if is_premium else min(relationship_level, 3)
-    system_prompt = build_system_prompt(user_name, effective_level, memories)
+
+    # Старые сообщения — в сжатое резюме, свежие — в историю
+    history_old = history[:-30] if len(history) > 30 else []
+    history_recent = history[-30:]
+    summary = build_context_summary(history_old)
+
+    system_prompt = build_system_prompt(user_name, effective_level, memories, history_summary=summary)
 
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in history[-15:]:
+    for msg in history_recent:
         messages.append({"role": msg.role, "content": msg.content})
     messages.append({"role": "user", "content": user_message})
 
