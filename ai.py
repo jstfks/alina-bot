@@ -9,9 +9,11 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Список моделей по приоритету — переключается автоматически при ошибке
 MODELS = [
     "deepseek/deepseek-v4-flash:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
+    "qwen/qwen3-235b-a22b:free",
+    "meta-llama/llama-4-maverick:free",
+    "openrouter/auto",
 ]
 
 
