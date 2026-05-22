@@ -4,7 +4,14 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import Column, BigInteger, Integer, String, Text, Float, Boolean, Date, DateTime, select, update
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgresql://", "postgresql+asyncpg://")
+_raw_db_url = os.getenv("DATABASE_URL", "")
+if not _raw_db_url:
+    raise ValueError("DATABASE_URL не задан! Проверь Variables в Railway.")
+DATABASE_URL = (
+    _raw_db_url
+    .replace("postgresql://", "postgresql+asyncpg://")
+    .replace("postgres://", "postgresql+asyncpg://")
+)
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
