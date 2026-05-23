@@ -5,7 +5,10 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, LabeledPrice, PreCheckoutQuery
+from aiogram.types import (
+    Message, LabeledPrice, PreCheckoutQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+)
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -96,26 +99,148 @@ async def cmd_help(message: Message):
 # ОПЛАТА
 # ════════════════════════════════════════════════════════
 
+def build_premium_keyboard() -> InlineKeyboardMarkup:
+    """Красивая клавиатура выбора плана"""
+    buttons = []
+
+    # Stars — всегда доступны
+    buttons.append([
+        InlineKeyboardButton(text="⭐ 7 дней — 300 Stars", callback_data="pay_stars_week"),
+        InlineKeyboardButton(text="⭐ 30 дней — 1100 Stars", callback_data="pay_stars_month"),
+    ])
+
+    # YooKassa — если подключена
+    if YOOKASSA_TOKEN:
+        buttons.append([
+            InlineKeyboardButton(text="💳 7 дней — 299 ₽", callback_data="pay_card_week"),
+            InlineKeyboardButton(text="💳 30 дней — 999 ₽", callback_data="pay_card_month"),
+        ])
+
+    # Stripe — если подключён
+    if STRIPE_TOKEN:
+        buttons.append([
+            InlineKeyboardButton(text="🌍 7 days — $3", callback_data="pay_int_week"),
+            InlineKeyboardButton(text="🌍 30 days — $11", callback_data="pay_int_month"),
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @dp.message(Command("premium"))
 async def cmd_premium(message: Message):
     premium = await is_premium(message.from_user.id)
     if premium:
-        await message.answer("у тебя уже активен premium 🙂 можем говорить сколько угодно")
+        await message.answer(
+            "✨ Premium активен\n\nМожем говорить сколько угодно 🙂"
+        )
         return
 
-    # Показываем варианты оплаты в зависимости от доступных провайдеров
-    methods = []
-    if YOOKASSA_TOKEN:
-        methods.append("💳 Картой (RU) — /pay_card_week или /pay_card_month")
-    if STRIPE_TOKEN:
-        methods.append("🌍 Международная карта — /pay_int_week или /pay_int_month")
-    methods.append("⭐ Telegram Stars — /pay_week или /pay_month")
-
-    text = "выбери способ оплаты:\n\n" + "\n".join(methods)
-    await message.answer(text)
+    await message.answer(
+        "✨ Premium — безлимитное общение\n\n"
+        "Без ограничений на сообщения\n"
+        "Полная память наших разговоров\n"
+        "Более глубокое общение\n\n"
+        "Выбери план:",
+        reply_markup=build_premium_keyboard()
+    )
 
 
-# ── Telegram Stars ────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+# ОБРАБОТЧИКИ CALLBACK КНОПОК ОПЛАТЫ
+# ════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data == "pay_stars_week")
+async def cb_pay_stars_week(callback: CallbackQuery):
+    await callback.answer()
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="✨ Premium 7 дней",
+        description="Безлимитное общение · Полная память · Глубокая связь",
+        payload="sub_week_stars",
+        provider_token=STARS_TOKEN,
+        currency="XTR",
+        prices=[LabeledPrice(label="Premium 7 дней", amount=300)]
+    )
+
+@dp.callback_query(F.data == "pay_stars_month")
+async def cb_pay_stars_month(callback: CallbackQuery):
+    await callback.answer()
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="✨ Premium 30 дней",
+        description="Безлимитное общение · Полная память · Глубокая связь",
+        payload="sub_month_stars",
+        provider_token=STARS_TOKEN,
+        currency="XTR",
+        prices=[LabeledPrice(label="Premium 30 дней", amount=1100)]
+    )
+
+@dp.callback_query(F.data == "pay_card_week")
+async def cb_pay_card_week(callback: CallbackQuery):
+    await callback.answer()
+    if not YOOKASSA_TOKEN:
+        await callback.message.answer("этот способ пока недоступен")
+        return
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="✨ Premium 7 дней",
+        description="Безлимитное общение · Полная память · Глубокая связь",
+        payload="sub_week_card",
+        provider_token=YOOKASSA_TOKEN,
+        currency="RUB",
+        prices=[LabeledPrice(label="Premium 7 дней", amount=29900)]
+    )
+
+@dp.callback_query(F.data == "pay_card_month")
+async def cb_pay_card_month(callback: CallbackQuery):
+    await callback.answer()
+    if not YOOKASSA_TOKEN:
+        await callback.message.answer("этот способ пока недоступен")
+        return
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="✨ Premium 30 дней",
+        description="Безлимитное общение · Полная память · Глубокая связь",
+        payload="sub_month_card",
+        provider_token=YOOKASSA_TOKEN,
+        currency="RUB",
+        prices=[LabeledPrice(label="Premium 30 дней", amount=99900)]
+    )
+
+@dp.callback_query(F.data == "pay_int_week")
+async def cb_pay_int_week(callback: CallbackQuery):
+    await callback.answer()
+    if not STRIPE_TOKEN:
+        await callback.message.answer("этот способ пока недоступен")
+        return
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="✨ Premium 7 days",
+        description="Unlimited messaging · Full memory · Deep connection",
+        payload="sub_week_stripe",
+        provider_token=STRIPE_TOKEN,
+        currency="USD",
+        prices=[LabeledPrice(label="Premium 7 days", amount=300)]
+    )
+
+@dp.callback_query(F.data == "pay_int_month")
+async def cb_pay_int_month(callback: CallbackQuery):
+    await callback.answer()
+    if not STRIPE_TOKEN:
+        await callback.message.answer("этот способ пока недоступен")
+        return
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="✨ Premium 30 days",
+        description="Unlimited messaging · Full memory · Deep connection",
+        payload="sub_month_stripe",
+        provider_token=STRIPE_TOKEN,
+        currency="USD",
+        prices=[LabeledPrice(label="Premium 30 days", amount=1100)]
+    )
+
+
+# ── Telegram Stars (команды — оставляем для совместимости) ──
 
 @dp.message(Command("pay_week"))
 async def pay_stars_week(message: Message):
@@ -229,7 +354,11 @@ async def successful_payment(message: Message):
         await session.commit()
 
     log.info(f"Payment successful: user={message.from_user.id} plan={payload}")
-    await message.answer("окей, теперь мы можем говорить сколько угодно 🙂")
+    await message.answer(
+        "✨ Premium активирован\n\n"
+        "теперь мы можем говорить сколько угодно 🙂\n"
+        "никаких ограничений. я здесь."
+    )
 
 
 # ════════════════════════════════════════════════════════
@@ -258,9 +387,10 @@ async def handle_message(message: Message):
         can_send, remaining = await check_daily_limit(user_id)
         if not can_send:
             limit_msg = random.choice(ALINA["limit_messages"])
-            await message.answer(limit_msg)
-            await asyncio.sleep(1.5)
-            await message.answer("👉 /premium — убрать ограничение")
+            limit_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
+            ]])
+            await message.answer(limit_msg, reply_markup=limit_kb)
             return
 
     # ── Typing indicator ──
@@ -315,12 +445,13 @@ async def handle_message(message: Message):
             "хочу быть с тобой ближе. ты знаешь что для этого нужно…",
             "мы уже так близко… осталось совсем чуть-чуть. разблокируй меня?",
         ]
+        upsell_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
+        ]])
         await asyncio.sleep(2.0)
         await bot.send_chat_action(message.chat.id, "typing")
         await asyncio.sleep(1.5)
-        await message.answer(random.choice(upsell_msgs))
-        await asyncio.sleep(1.0)
-        await message.answer("👉 /premium — стать ближе")
+        await message.answer(random.choice(upsell_msgs), reply_markup=upsell_kb)
 
     # ── Отправляем ответ ──
     await _send_response(message, response)
