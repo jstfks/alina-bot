@@ -237,7 +237,6 @@ def build_system_prompt(
     user_name: str,
     relationship_level: int,
     memories: list,
-    user_timezone_offset: int = 3,
 ) -> str:
     import datetime
 
@@ -247,22 +246,23 @@ def build_system_prompt(
     )
     memory_block = build_memory_prompt(memories)
 
-    utc_now    = datetime.datetime.utcnow()
-    local_hour = (utc_now.hour + user_timezone_offset) % 24
-    local_min  = utc_now.minute
-    local_date = utc_now + datetime.timedelta(hours=user_timezone_offset)
+    # Алина живёт в Москве — UTC+3, без летнего времени (отменено с 2014)
+    MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
+    now        = datetime.datetime.now(tz=MOSCOW)
+    local_hour = now.hour
+    local_min  = now.minute
     weekday_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-    day_name   = weekday_ru[local_date.weekday()]
+    day_name   = weekday_ru[now.weekday()]
     time_str   = f"{local_hour:02d}:{local_min:02d}"
 
-    if 6 <= local_hour < 12:
-        time_ctx = f"утро, {time_str}, {day_name}"
+    if 5 <= local_hour < 12:
+        time_of_day = "утро"
     elif 12 <= local_hour < 18:
-        time_ctx = f"день, {time_str}, {day_name}"
+        time_of_day = "день"
     elif 18 <= local_hour < 23:
-        time_ctx = f"вечер, {time_str}, {day_name}"
+        time_of_day = "вечер"
     else:
-        time_ctx = f"ночь, {time_str}, {day_name}"
+        time_of_day = "ночь"
 
     name_str = f"Его зовут {user_name}." if user_name else ""
 
@@ -276,8 +276,9 @@ def build_system_prompt(
 
 {rel_description}
 
-Сейчас у него: {time_ctx}. {name_str}
-Не упоминай время и день недели без причины — только если уместно.
+У тебя сейчас по московскому времени: {time_of_day}, {time_str}, {day_name}. {name_str}
+Если спросят который час — отвечай именно это время. Не выдумывай и не говори что не знаешь.
+Время суток влияет на твоё настроение: утром ты только просыпаешься, днём на работе или после, вечером расслаблена, ночью тише и откровеннее.
 
 {memory_block}
 
