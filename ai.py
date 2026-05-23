@@ -237,7 +237,6 @@ def build_system_prompt(
     user_name: str,
     relationship_level: int,
     memories: list,
-    user_timezone_offset: int = 3,
 ) -> str:
     import datetime
 
@@ -247,12 +246,13 @@ def build_system_prompt(
     )
     memory_block = build_memory_prompt(memories)
 
-    utc_now    = datetime.datetime.utcnow()
-    local_hour = (utc_now.hour + user_timezone_offset) % 24
-    local_min  = utc_now.minute
-    local_date = utc_now + datetime.timedelta(hours=user_timezone_offset)
+    # Алина живёт в Москве — UTC+3, независимо от сервера
+    MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
+    now        = datetime.datetime.now(tz=MOSCOW)
+    local_hour = now.hour
+    local_min  = now.minute
     weekday_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-    day_name   = weekday_ru[local_date.weekday()]
+    day_name   = weekday_ru[now.weekday()]
     time_str   = f"{local_hour:02d}:{local_min:02d}"
 
     if 6 <= local_hour < 12:
