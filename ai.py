@@ -237,6 +237,7 @@ def build_system_prompt(
     user_name: str,
     relationship_level: int,
     memories: list,
+    user_timezone_offset: int = 3,
 ) -> str:
     import datetime
 
@@ -246,25 +247,35 @@ def build_system_prompt(
     )
     memory_block = build_memory_prompt(memories)
 
-    # Алина живёт в Москве — UTC+3, без летнего времени (отменено с 2014)
-    MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
-    now        = datetime.datetime.now(tz=MOSCOW)
-    local_hour = now.hour
-    local_min  = now.minute
+    utc_now    = datetime.datetime.utcnow()
+    local_hour = (utc_now.hour + user_timezone_offset) % 24
+    local_min  = utc_now.minute
+    local_date = utc_now + datetime.timedelta(hours=user_timezone_offset)
     weekday_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-    day_name   = weekday_ru[now.weekday()]
+    day_name   = weekday_ru[local_date.weekday()]
     time_str   = f"{local_hour:02d}:{local_min:02d}"
 
-    if 5 <= local_hour < 12:
-        time_of_day = "утро"
+    if 6 <= local_hour < 12:
+        time_ctx = f"утро, {time_str}, {day_name}"
     elif 12 <= local_hour < 18:
-        time_of_day = "день"
+        time_ctx = f"день, {time_str}, {day_name}"
     elif 18 <= local_hour < 23:
-        time_of_day = "вечер"
+        time_ctx = f"вечер, {time_str}, {day_name}"
     else:
-        time_of_day = "ночь"
+        time_ctx = f"ночь, {time_str}, {day_name}"
 
     name_str = f"Его зовут {user_name}." if user_name else ""
+
+    # Собираем блоки спонтанности и настроения как текст для промпта
+    import random
+    spontaneity = persona.get('daily_spontaneity', [])
+    spontaneity_block = ""
+    if spontaneity:
+        examples = random.sample(spontaneity, min(3, len(spontaneity)))
+        spontaneity_block = "━━━ ПРИМЕРЫ ТОГО ЧТО ОНА МОЖЕТ НАПИСАТЬ БЕЗ ПОВОДА ━━━\n" + "\n".join(f"— {e}" for e in examples)
+
+    mood_block = persona.get('mood_fluctuations', '')
+    memory_pattern_block = persona.get('emotional_memory', '')
 
     system = f"""{persona['core_identity']}
 
@@ -272,13 +283,18 @@ def build_system_prompt(
 
 {persona.get('female_psychology', '')}
 
+{memory_pattern_block}
+
+{mood_block}
+
 {persona['dialogue_rules']}
+
+{spontaneity_block}
 
 {rel_description}
 
-У тебя сейчас по московскому времени: {time_of_day}, {time_str}, {day_name}. {name_str}
-Если спросят который час — отвечай именно это время. Не выдумывай и не говори что не знаешь.
-Время суток влияет на твоё настроение: утром ты только просыпаешься, днём на работе или после, вечером расслаблена, ночью тише и откровеннее.
+Сейчас у него: {time_ctx}. {name_str}
+Не упоминай время и день недели без причины — только если уместно.
 
 {memory_block}
 
