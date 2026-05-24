@@ -12,17 +12,17 @@ GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # ── Модели ────────────────────────────────────────────────
-GEMINI_MODEL   = "gemini-2.5-flash"          # основная
-DEEPSEEK_MODEL = "deepseek-chat"             # резерв 1  (V3.2)
+DEEPSEEK_MODEL = "deepseek-chat"             # основная (V3.2, лучший roleplay)
+GEMINI_MODEL   = "gemini-2.5-flash"          # резерв 1
 GROQ_MODEL     = "moonshotai/kimi-k2-instruct"  # резерв 2
 
 # OpenRouter — последний рубеж, бесплатные модели по убыванию качества
 OPENROUTER_FALLBACK_MODELS = [
-    "z-ai/glm-4.5-air:free",                       # хорош для диалога/roleplay
-    "deepseek/deepseek-v3-0324:free",               # DeepSeek через OR
-    "qwen/qwen3-235b-a22b:free",
-    "meta-llama/llama-4-maverick:free",
-    "openrouter/auto",
+    "deepseek/deepseek-v3-0324:free",               # DeepSeek V3.2 — лучший roleplay бесплатно
+    "meta-llama/llama-4-maverick:free",             # Llama 4, 1M контекст
+    "qwen/qwen3-235b-a22b:free",                    # Qwen3 235B
+    "nousresearch/hermes-3-llama-3.1-405b:free",    # 405B, roleplay/agentic
+    "meta-llama/llama-3.3-70b-instruct:free",       # надёжный резерв
 ]
 
 
@@ -200,23 +200,23 @@ async def _route_and_call(
     temperature: float = 0.92,
 ) -> str | None:
     """
-    Цепочка вызовов (единая для всех уровней и статусов):
-    1. Gemini 2.5 Flash     — основная
-    2. DeepSeek V3.2        — резерв 1
+    Цепочка вызовов:
+    1. DeepSeek V3.2        — основная (лучший roleplay)
+    2. Gemini 2.5 Flash     — резерв 1
     3. Kimi K2 (Groq)       — резерв 2
-    4. OpenRouter (GLM/DS)  — последний рубеж
+    4. OpenRouter            — последний рубеж
     """
-    # 1. Gemini
-    result = await _call_gemini(messages, max_tokens, temperature)
-    if result:
-        return result
-    print("[route] Gemini недоступен → DeepSeek")
-
-    # 2. DeepSeek
+    # 1. DeepSeek V3.2 — основная
     result = await _call_deepseek(messages, max_tokens, temperature)
     if result:
         return result
-    print("[route] DeepSeek недоступен → Kimi K2 (Groq)")
+    print("[route] DeepSeek недоступен → Gemini")
+
+    # 2. Gemini 2.5 Flash — резерв 1
+    result = await _call_gemini(messages, max_tokens, temperature)
+    if result:
+        return result
+    print("[route] Gemini недоступен → Kimi K2 (Groq)")
 
     # 3. Kimi K2 через Groq
     result = await _call_groq(messages, max_tokens, temperature)
@@ -237,7 +237,6 @@ def build_system_prompt(
     user_name: str,
     relationship_level: int,
     memories: list,
-    user_timezone_offset: int = 3,
 ) -> str:
     import datetime
 
@@ -247,22 +246,23 @@ def build_system_prompt(
     )
     memory_block = build_memory_prompt(memories)
 
-    utc_now    = datetime.datetime.utcnow()
-    local_hour = (utc_now.hour + user_timezone_offset) % 24
-    local_min  = utc_now.minute
-    local_date = utc_now + datetime.timedelta(hours=user_timezone_offset)
+    # Алина живёт в Москве — UTC+3, летнего времени нет с 2014 года
+    MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
+    now        = datetime.datetime.now(tz=MOSCOW)
+    local_hour = now.hour
+    local_min  = now.minute
     weekday_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-    day_name   = weekday_ru[local_date.weekday()]
+    day_name   = weekday_ru[now.weekday()]
     time_str   = f"{local_hour:02d}:{local_min:02d}"
 
-    if 6 <= local_hour < 12:
-        time_ctx = f"утро, {time_str}, {day_name}"
+    if 5 <= local_hour < 12:
+        time_of_day = "утро"
     elif 12 <= local_hour < 18:
-        time_ctx = f"день, {time_str}, {day_name}"
+        time_of_day = "день"
     elif 18 <= local_hour < 23:
-        time_ctx = f"вечер, {time_str}, {day_name}"
+        time_of_day = "вечер"
     else:
-        time_ctx = f"ночь, {time_str}, {day_name}"
+        time_of_day = "ночь"
 
     name_str = f"Его зовут {user_name}." if user_name else ""
 
@@ -293,8 +293,9 @@ def build_system_prompt(
 
 {rel_description}
 
-Сейчас у него: {time_ctx}. {name_str}
-Не упоминай время и день недели без причины — только если уместно.
+Сейчас у тебя по московскому времени: {time_of_day}, {time_str}, {day_name}. {name_str}
+Если спросят который час — отвечай именно это время, не выдумывай.
+Время суток влияет на твой тон: утром ты только просыпаешься, днём на работе или после, вечером расслаблена, ночью тише и откровеннее.
 
 {memory_block}
 
