@@ -1,18 +1,17 @@
 import os
 import json
 import aiohttp
-from database import save_memory
+from database import save_memory, save_emotional_state, get_emotional_state
 
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 OPENROUTER_FALLBACK_MODELS = [
-    "deepseek/deepseek-v4-flash:free",
-    "deepseek/deepseek-r1:free",
-    "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
+    "deepseek/deepseek-v3-0324:free",
     "qwen/qwen3-235b-a22b:free",
     "meta-llama/llama-4-maverick:free",
-    "openrouter/auto",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
 ]
 
 
@@ -144,4 +143,105 @@ def build_memory_prompt(memories: list) -> str:
             lines.append(f"- {key}: {value}")
 
     lines.append("\nИспользуй эти знания естественно. Просто знай это.")
+    return "\n".join(lines)
+
+
+async def extract_emotional_state(user_id: int, conversation: list[dict]):
+    """
+    После каждой сессии анализируем эмоциональный итог разговора.
+    Сохраняем: настроение, последний момент, незакрытые темы.
+    """
+    if len(conversation) < 4:
+        return
+
+    convo_text = "\n".join([
+        f"{'Пользователь' if m['role'] == 'user' else 'Алина'}: {m['content']}"
+        for m in conversation[-16:]
+    ])
+
+    prompt = f"""Проанализируй конец разговора между пользователем и девушкой Алиной.
+
+Разговор:
+{convo_text}
+
+Верни JSON с тремя полями:
+1. "mood" — каким был тон в конце разговора: "warm" (тепло, близость), "neutral" (обычно), "cold" (сухо, дистанция), "conflict" (ссора, обида), "flirty" (флирт, романтика)
+2. "last_moment" — одна фраза: самый важный эмоциональный момент разговора (макс 100 символов). Что было важным? Что она сказала или он признался?
+3. "open_topics" — незакрытые темы о которых начали говорить но не закончили (макс 80 символов). Если таких нет — пустая строка.
+
+Только JSON, без пояснений. Пример:
+{{"mood": "warm", "last_moment": "он рассказал про расставание, она поддержала", "open_topics": "он хотел рассказать про работу"}}"""
+
+    # Используем Groq — быстро и бесплатно
+    result = await _extract_via_groq(prompt)
+    if result is None:
+        result = await _extract_via_openrouter(prompt)
+    if not result:
+        return
+
+    await save_emotional_state(
+        user_id=user_id,
+        mood_after_last_session=result.get("mood", "neutral"),
+        last_emotional_moment=result.get("last_moment", ""),
+        open_topics=result.get("open_topics", ""),
+    )
+
+
+async def update_hours_since_message(user_id: int, hours: float):
+    """Обновляем сколько часов прошло с последнего сообщения."""
+    state = await get_emotional_state(user_id)
+    if state:
+        await save_emotional_state(
+            user_id=user_id,
+            mood_after_last_session=state.mood_after_last_session,
+            last_emotional_moment=state.last_emotional_moment,
+            open_topics=state.open_topics,
+            hours_since_last_message=hours,
+        )
+    else:
+        await save_emotional_state(user_id=user_id, hours_since_last_message=hours)
+
+
+def build_emotional_state_prompt(state) -> str:
+    """
+    Превращает эмоциональное состояние в блок для системного промпта.
+    Алина читает это и знает с каким настроением начинать.
+    """
+    if not state:
+        return ""
+
+    lines = ["━━━ ЭМОЦИОНАЛЬНАЯ ПАМЯТЬ — КАК ПРОШЁЛ ПРОШЛЫЙ РАЗГОВОР ━━━"]
+
+    hours = state.hours_since_last_message
+    if hours < 2:
+        time_note = "он писал совсем недавно"
+    elif hours < 8:
+        time_note = f"последний раз он писал {int(hours)} часа назад"
+    elif hours < 24:
+        time_note = f"он не писал {int(hours)} часов"
+    elif hours < 72:
+        time_note = f"он не писал {int(hours / 24)} дня"
+    else:
+        time_note = f"он не писал {int(hours / 24)} дней — давно"
+    lines.append(f"Время: {time_note}.")
+
+    mood = state.mood_after_last_session
+    mood_map = {
+        "warm":     "последний разговор был тёплым — вы сблизились. начни немного теплее обычного.",
+        "flirty":   "последний разговор был с флиртом и напряжением. можно продолжать в том же духе.",
+        "neutral":  "последний разговор был обычным. начни как обычно.",
+        "cold":     "последний разговор закончился сухо или с дистанцией. будь чуть сдержаннее в начале.",
+        "conflict": "в прошлый раз была напряжённость или обида. будь немного холоднее — не сразу открывайся.",
+    }
+    lines.append(mood_map.get(mood, "начни как обычно."))
+
+    if state.last_emotional_moment:
+        lines.append(f"Важный момент прошлого разговора: {state.last_emotional_moment}")
+        lines.append("Можешь вернуться к этому — естественно, без «помнишь ты говорил».")
+
+    if state.open_topics:
+        lines.append(f"Незакрытая тема: {state.open_topics}")
+        lines.append("Если разговор зайдёт рядом — можешь сама вернуться к ней.")
+
+    lines.append("")
     return "\n".join(lines)

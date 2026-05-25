@@ -18,10 +18,11 @@ from database import (
     init_db, get_or_create_user, get_or_create_persona,
     save_message, get_history, get_memories,
     check_daily_limit, increment_usage, is_premium,
-    update_relationship, AsyncSessionLocal
+    update_relationship, AsyncSessionLocal,
+    get_emotional_state, save_emotional_state
 )
 from ai import get_ai_response, generate_reengagement_message
-from memory import extract_memories
+from memory import extract_memories, extract_emotional_state, update_hours_since_message
 from persona import ALINA
 
 load_dotenv()
@@ -408,6 +409,14 @@ async def handle_message(message: Message):
     # ── Получаем историю ──
     history = await get_history(user_id, limit=30)
 
+    # ── Эмоциональное состояние из прошлой сессии ──
+    emotional_state = await get_emotional_state(user_id)
+
+    # ── Обновляем сколько часов прошло с прошлого сообщения ──
+    if emotional_state and upersona.last_interaction:
+        hours_elapsed = (datetime.utcnow() - upersona.last_interaction).total_seconds() / 3600
+        asyncio.create_task(update_hours_since_message(user_id, round(hours_elapsed, 1)))
+
     # ── Генерируем ответ ──
     response = await get_ai_response(
         user_id            = user_id,
@@ -417,7 +426,8 @@ async def handle_message(message: Message):
         relationship_level = upersona.relationship_level,
         memories           = memories,
         message_count_today= FREE_LIMIT - (remaining if not premium else 0),
-        is_premium         = premium
+        is_premium         = premium,
+        emotional_state    = emotional_state,
     )
 
     # ── Сохраняем ответ ──
@@ -456,14 +466,15 @@ async def handle_message(message: Message):
     # ── Отправляем ответ ──
     await _send_response(message, response)
 
-    # ── Извлекаем память асинхронно ──
+    # ── Извлекаем факты и эмоциональное состояние асинхронно ──
+    convo_dicts = [{"role": m.role, "content": m.content} for m in history[-16:]]
+
     if len(history) % 6 == 0:
-        asyncio.create_task(
-            extract_memories(
-                user_id,
-                [{"role": m.role, "content": m.content} for m in history[-12:]]
-            )
-        )
+        asyncio.create_task(extract_memories(user_id, convo_dicts))
+
+    # Эмоциональный итог сессии — каждые 8 сообщений
+    if len(history) % 8 == 0:
+        asyncio.create_task(extract_emotional_state(user_id, convo_dicts))
 
 
 async def _send_response(message: Message, response: str):
@@ -520,6 +531,9 @@ async def check_inactive_users():
             continue
 
         try:
+            # Обновляем время молчания перед отправкой
+            await update_hours_since_message(user.id, float(hours_inactive))
+
             msg = await generate_reengagement_message(
                 user_name          = user.user_name_given or user.first_name or "",
                 hours_inactive     = hours_inactive,

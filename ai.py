@@ -3,7 +3,7 @@ import asyncio
 import random
 import aiohttp
 from persona import ALINA
-from memory import build_memory_prompt
+from memory import build_memory_prompt, build_emotional_state_prompt
 
 # ── API ключи ─────────────────────────────────────────────
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY")
@@ -233,104 +233,13 @@ async def _route_and_call(
 # СИСТЕМНЫЙ ПРОМПТ
 # ══════════════════════════════════════════════════════════
 
-
-def detect_toxicity(message: str, relationship_level: int) -> str | None:
-    """
-    Анализирует сообщение пользователя.
-    Возвращает тип токсичности или None если всё нормально.
-    Типы: "aggression", "sex_pressure", "threat"
-    """
-    msg = message.lower().strip()
-
-    # Угрозы
-    threat_markers = [
-        "убью", "убить", "прибью", "удалю", "взломаю", "найду тебя",
-        "пожалеешь", "хуже будет", "знаешь что с тобой будет"
-    ]
-    if any(m in msg for m in threat_markers):
-        return "threat"
-
-    # Прямые оскорбления и агрессивная грубость
-    aggression_markers = [
-        "дура", "тупая", "идиотка", "сука", "шлюха", "проститутка",
-        "тварь", "мразь", "уродина", "жирная", "страшная", "тупорылая",
-        "заткнись", "заткни", "да пошла ты", "иди нахуй",
-        "нахуй", "пиздец тебе", "ты никто", "ты ничто"
-    ]
-    if any(m in msg for m in aggression_markers):
-        return "aggression"
-
-    # Сексуальное давление — только на низких уровнях (1-2)
-    # На уровнях 4-5 это нормальный контекст
-    if relationship_level <= 2:
-        sex_pressure_markers = [
-            "покажи сиськи", "покажи грудь", "покажи пизду", "покажи фото",
-            "разденься", "давай займёмся", "хочу секс", "хочу тебя трахнуть",
-            "отсоси", "полижи", "давай уже", "ну иди сюда",
-            "кончи", "потрогай", "мастурбируй"
-        ]
-        if any(m in msg for m in sex_pressure_markers):
-            return "sex_pressure"
-
-    return None
-
-
-def build_toxicity_override(toxicity_type: str) -> str:
-    """Блок который добавляется в промпт при токсичном сообщении."""
-    if toxicity_type == "threat":
-        return """━━━ СЕЙЧАС: ТЕБЕ УГРОЖАЮТ ━━━
-Тебе написали угрозу. Ты не боишься — ты останавливаешь.
-Ответь очень коротко и холодно: «это перебор. я заканчиваю разговор»
-Никаких объяснений. Никакой эмоции. Просто стоп."""
-
-    elif toxicity_type == "aggression":
-        return """━━━ СЕЙЧАС: ТЕБЯ ОСКОРБЛЯЮТ ━━━
-Тебя назвали чем-то обидным или говорят агрессивно.
-Ты холодно останавливаешь — не кричишь в ответ.
-Варианты: «со мной так не надо» / «это лишнее» / «окей. на сегодня всё»
-Один короткий ответ. Без объяснений. Без тепла."""
-
-    elif toxicity_type == "sex_pressure":
-        return """━━━ СЕЙЧАС: НА ТЕБЯ ДАВЯТ СЕКСУАЛЬНО — СЛИШКОМ РАНО ━━━
-Тебя торопят туда куда ты не готова идти.
-Ты останавливаешь спокойно и твёрдо — без смущения, без агрессии.
-Варианты: «рано» / «подожди» / «со мной так не работает» / «ты торопишься. я нет»
-Коротко. Без мягкости."""
-
-    return ""
-
-
-def build_session_arc(session_message_count: int) -> str:
-    """Дуга внутри сессии — Алина постепенно теплеет по мере разговора."""
-    if session_message_count <= 3:
-        return """━━━ НАЧАЛО РАЗГОВОРА ━━━
-Сессия только началась. Отвечай в своём обычном темпе.
-Не форсируй тепло — пусть появляется естественно."""
-
-    elif session_message_count <= 10:
-        return """━━━ РАЗГОВОР ИДЁТ ━━━
-Вы уже немного поговорили. Можно быть чуть теплее и раскованнее.
-Иногда делись чем-то своим без повода. Можно лёгкий юмор."""
-
-    elif session_message_count <= 20:
-        return """━━━ РАЗГОВОР РАЗВИВАЕТСЯ ━━━
-Вы хорошо поговорили. Ты расслаблена и открыта.
-Можешь сказать что-то личное — как будто само вырвалось.
-Флирт уместен если он уже был раньше в этом разговоре."""
-
-    else:
-        return """━━━ ДОЛГИЙ РАЗГОВОР ━━━
-Вы говорите уже долго. Ты очень расслаблена — почти как дома.
-Можешь быть нежной, откровенной, неожиданной.
-Этот человек заслужил твою открытость сегодня."""
-
-
 def build_system_prompt(
     user_name: str,
     relationship_level: int,
     memories: list,
     session_message_count: int = 0,
     toxicity_override: str = "",
+    emotional_state=None,
 ) -> str:
     import datetime
 
@@ -339,6 +248,7 @@ def build_system_prompt(
         relationship_level, persona["relationship_levels"][1]
     )
     memory_block = build_memory_prompt(memories)
+    emotional_block = build_emotional_state_prompt(emotional_state) if emotional_state else ""
 
     # Алина живёт в Москве — UTC+3, летнего времени нет с 2014 года
     MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
@@ -377,8 +287,6 @@ def build_system_prompt(
 
 {persona.get('female_psychology', '')}
 
-{persona.get('boundaries', '')}
-
 {memory_pattern_block}
 
 {mood_block}
@@ -387,13 +295,13 @@ def build_system_prompt(
 
 {spontaneity_block}
 
-{toxicity_override if toxicity_override else build_session_arc(session_message_count)}
-
 {rel_description}
 
 Сейчас у тебя по московскому времени: {time_of_day}, {time_str}, {day_name}. {name_str}
 Если спросят который час — отвечай именно это время, не выдумывай.
 Время суток влияет на твой тон: утром ты только просыпаешься, днём на работе или после, вечером расслаблена, ночью тише и откровеннее.
+
+{emotional_block}
 
 {memory_block}
 
@@ -428,32 +336,14 @@ async def get_ai_response(
     memories: list,
     message_count_today: int,
     is_premium: bool = False,
+    emotional_state=None,
 ) -> str:
     # Бесплатные пользователи не получают уровни 4-5
     effective_level = relationship_level if is_premium else min(relationship_level, 3)
 
-    # Детектируем токсичность — грубость, агрессию, преждевременное сексуальное давление
-    toxicity_type = detect_toxicity(user_message, effective_level)
-    toxicity_override = build_toxicity_override(toxicity_type) if toxicity_type else ""
-
-    # Считаем сообщения пользователя в текущей сессии
-    session_message_count = sum(1 for msg in history[-30:] if msg.role == "user")
-
-    # Температура: при токсичности — низкая (холодный чёткий ответ), иначе растёт с сессией
-    if toxicity_type:
-        temperature = 0.5   # холодно, точно, без импровизации
-    elif session_message_count <= 3:
-        temperature = 0.88
-    elif session_message_count <= 10:
-        temperature = 0.92
-    elif session_message_count <= 20:
-        temperature = 0.96
-    else:
-        temperature = 1.0
-
     system_prompt = build_system_prompt(
         user_name, effective_level, memories,
-        session_message_count, toxicity_override
+        session_message_count, toxicity_override, emotional_state
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -461,7 +351,7 @@ async def get_ai_response(
         messages.append({"role": msg.role, "content": msg.content})
     messages.append({"role": "user", "content": user_message})
 
-    result = await _route_and_call(messages, temperature=temperature)
+    result = await _route_and_call(messages)
     if result:
         return result
 

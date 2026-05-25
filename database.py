@@ -56,6 +56,29 @@ class Memory(Base):
     created_at   = Column(DateTime, default=datetime.utcnow)
 
 
+
+
+class EmotionalState(Base):
+    __tablename__ = "emotional_states"
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    user_id        = Column(BigInteger, nullable=False, unique=True)
+    persona_id     = Column(String(50), default="alina")
+
+    # Общий тон после последней сессии: "warm", "neutral", "cold", "conflict"
+    mood_after_last_session  = Column(String(20), default="neutral")
+
+    # Последний эмоциональный момент — короткая фраза
+    last_emotional_moment    = Column(Text, default="")
+
+    # Незакрытые темы — то о чём говорили но не завершили
+    open_topics              = Column(Text, default="")
+
+    # Как давно он писал — влияет на то как она начинает
+    hours_since_last_message = Column(Float, default=0.0)
+
+    updated_at  = Column(DateTime, default=datetime.utcnow)
+
 class Message(Base):
     __tablename__ = "messages"
 
@@ -250,3 +273,48 @@ async def update_relationship(user_id: int, delta: float, persona_id: str = "ali
             await session.commit()
             return persona.relationship_level
     return 1
+
+
+async def get_emotional_state(user_id: int, persona_id: str = "alina") -> EmotionalState | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(EmotionalState).where(
+                EmotionalState.user_id == user_id,
+                EmotionalState.persona_id == persona_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+
+async def save_emotional_state(
+    user_id: int,
+    mood_after_last_session: str = "neutral",
+    last_emotional_moment: str = "",
+    open_topics: str = "",
+    hours_since_last_message: float = 0.0,
+    persona_id: str = "alina",
+):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(EmotionalState).where(
+                EmotionalState.user_id == user_id,
+                EmotionalState.persona_id == persona_id
+            )
+        )
+        state = result.scalar_one_or_none()
+        if state:
+            state.mood_after_last_session  = mood_after_last_session
+            state.last_emotional_moment    = last_emotional_moment
+            state.open_topics              = open_topics
+            state.hours_since_last_message = hours_since_last_message
+            state.updated_at               = datetime.utcnow()
+        else:
+            session.add(EmotionalState(
+                user_id=user_id,
+                persona_id=persona_id,
+                mood_after_last_session=mood_after_last_session,
+                last_emotional_moment=last_emotional_moment,
+                open_topics=open_topics,
+                hours_since_last_message=hours_since_last_message,
+            ))
+        await session.commit()
