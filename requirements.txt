@@ -2,7 +2,7 @@
 # Pin minor versions; patch versions updated via Dependabot / manual review.
 
 aiogram==3.7.0          # Telegram Bot API framework
-aiohttp==3.10.5         # Async HTTP client (shared session across providers)
+aiohttp==3.9.5          # Async HTTP client (must be ~=3.9.0 for aiogram 3.7.0)
 sqlalchemy==2.0.35      # ORM + async engine
 asyncpg==0.29.0         # PostgreSQL async driver
 python-dotenv==1.0.1    # .env file loading
