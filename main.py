@@ -1,83 +1,145 @@
-import os
+"""
+main.py — Telegram bot entry-point (Alina Bot).
+
+Key improvements over the original:
+- BOT_TOKEN validated at startup (fail-fast, not at first request).
+- handle_message uses check_and_increment_usage() — one atomic DB operation
+  replaces the original check → generate → increment race condition.
+- asyncio.create_task() calls are wrapped with a done-callback that logs
+  exceptions; fire-and-forget tasks that silently swallow errors are gone.
+- The upsell message is sent BEFORE the AI response so it can't get lost if
+  Telegram throttles the second message.
+- _send_response now caps individual part lengths to avoid hitting Telegram's
+  4096-byte limit.
+- check_inactive_users fetches rows inside a single session and iterates
+  without holding the session open during the (slow) send_message calls.
+- Scheduler uses misfire_grace_time so a missed firing doesn't pile up jobs.
+- Bot shutdown calls close_http_session() to drain the shared aiohttp session.
+- All remaining print() → structured logging.
+- Removed duplicate command/callback handlers (pay_week / pay_month commands
+  are kept for back-compatibility but share a single helper).
+- Type annotations throughout.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import random
 import logging
-from datetime import datetime, timedelta
+import os
+import random
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, LabeledPrice, PreCheckoutQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-)
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
+from ai import close_http_session, get_ai_response, generate_reengagement_message
 from database import (
-    init_db, get_or_create_user, get_or_create_persona,
-    save_message, get_history, get_memories,
-    check_daily_limit, increment_usage, is_premium,
-    update_relationship, AsyncSessionLocal,
-    get_emotional_state, save_emotional_state
+    AsyncSessionLocal,
+    Subscription,
+    check_and_increment_usage,
+    check_daily_limit,
+    get_emotional_state,
+    get_history,
+    get_memories,
+    get_or_create_persona,
+    get_or_create_user,
+    init_db,
+    is_premium,
+    save_message,
+    update_relationship,
 )
-from ai import get_ai_response, generate_reengagement_message
-from memory import extract_memories, extract_emotional_state, update_hours_since_message
+from memory import extract_emotional_state, extract_memories, update_hours_since_message
 from persona import ALINA
 
 load_dotenv()
 
-# ── Логирование ──────────────────────────────────────────
-logging.basicConfig(level=logging.INFO)
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 log = logging.getLogger(__name__)
 
-# ── Конфиг ───────────────────────────────────────────────
-BOT_TOKEN        = os.getenv("BOT_TOKEN")
-FREE_LIMIT       = 20        # сообщений в день бесплатно
-YOOKASSA_TOKEN   = os.getenv("YOOKASSA_TOKEN", "")   # рубли / карты РФ / СБП
-STRIPE_TOKEN     = os.getenv("STRIPE_TOKEN", "")      # валюта / международные карты
-STARS_TOKEN      = ""                                  # Telegram Stars — без токена
+# ── Config ────────────────────────────────────────────────────────────────────
 
-# ── Инициализация ─────────────────────────────────────────
+def _require_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Required environment variable '{name}' is not set.")
+    return value
+
+
+BOT_TOKEN      = _require_env("BOT_TOKEN")
+FREE_LIMIT     = 20
+YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "")
+STRIPE_TOKEN   = os.getenv("STRIPE_TOKEN", "")
+STARS_TOKEN    = ""  # Telegram Stars — no provider token needed
+
+# ── Bot & Dispatcher ──────────────────────────────────────────────────────────
+
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 
 
-# ════════════════════════════════════════════════════════
-# ОНБОРДИНГ
-# ════════════════════════════════════════════════════════
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _now_utc() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Callback attached to background tasks so exceptions surface in logs."""
+    exc = task.exception() if not task.cancelled() else None
+    if exc:
+        log.error("Background task %s raised: %s", task.get_name(), exc, exc_info=exc)
+
+
+def _create_background_task(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    task.add_done_callback(_log_task_exception)
+    return task
+
+
+# ── /start ────────────────────────────────────────────────────────────────────
 
 @dp.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message) -> None:
     user_id    = message.from_user.id
     username   = message.from_user.username
     first_name = message.from_user.first_name
 
-    user    = await get_or_create_user(user_id, username, first_name)
-    persona = await get_or_create_persona(user_id)
+    await get_or_create_user(user_id, username, first_name)
+    await get_or_create_persona(user_id)
 
-    # Если уже общались — не показываем первое сообщение заново
     history = await get_history(user_id, limit=1)
     if history:
         await message.answer("привет) я здесь 🙂")
         return
 
-    # Случайная первая фраза
     variants = ALINA.get("first_message_variants", [ALINA["first_message"]])
     await message.answer(random.choice(variants))
 
 
-# ════════════════════════════════════════════════════════
-# МЕНЮ
-# ════════════════════════════════════════════════════════
+# ── /menu ─────────────────────────────────────────────────────────────────────
 
 @dp.message(Command("menu"))
-async def cmd_menu(message: Message):
+async def cmd_menu(message: Message) -> None:
     premium = await is_premium(message.from_user.id)
     if premium:
         status = "✅ Premium активен — безлимитное общение"
     else:
-        _, remaining = await check_daily_limit(message.from_user.id)
+        _, remaining = await check_daily_limit(message.from_user.id, FREE_LIMIT)
         status = f"🆓 Бесплатный план — осталось {remaining} сообщений сегодня"
 
     await message.answer(
@@ -88,7 +150,7 @@ async def cmd_menu(message: Message):
 
 
 @dp.message(Command("help"))
-async def cmd_help(message: Message):
+async def cmd_help(message: Message) -> None:
     await message.answer(
         "просто пиши мне — я отвечу 🙂\n\n"
         "/menu — статус подписки\n"
@@ -96,31 +158,23 @@ async def cmd_help(message: Message):
     )
 
 
-# ════════════════════════════════════════════════════════
-# ОПЛАТА
-# ════════════════════════════════════════════════════════
+# ── /premium & payment keyboard ──────────────────────────────────────────────
 
-def build_premium_keyboard() -> InlineKeyboardMarkup:
-    """Красивая клавиатура выбора плана"""
-    buttons = []
+def _build_premium_keyboard() -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
 
-    # Stars — всегда доступны
     buttons.append([
-        InlineKeyboardButton(text="⭐ 7 дней — 300 Stars", callback_data="pay_stars_week"),
+        InlineKeyboardButton(text="⭐ 7 дней — 300 Stars",  callback_data="pay_stars_week"),
         InlineKeyboardButton(text="⭐ 30 дней — 1100 Stars", callback_data="pay_stars_month"),
     ])
-
-    # YooKassa — если подключена
     if YOOKASSA_TOKEN:
         buttons.append([
-            InlineKeyboardButton(text="💳 7 дней — 299 ₽", callback_data="pay_card_week"),
-            InlineKeyboardButton(text="💳 30 дней — 999 ₽", callback_data="pay_card_month"),
+            InlineKeyboardButton(text="💳 7 дней — 299 ₽",   callback_data="pay_card_week"),
+            InlineKeyboardButton(text="💳 30 дней — 999 ₽",  callback_data="pay_card_month"),
         ])
-
-    # Stripe — если подключён
     if STRIPE_TOKEN:
         buttons.append([
-            InlineKeyboardButton(text="🌍 7 days — $3", callback_data="pay_int_week"),
+            InlineKeyboardButton(text="🌍 7 days — $3",  callback_data="pay_int_week"),
             InlineKeyboardButton(text="🌍 30 days — $11", callback_data="pay_int_month"),
         ])
 
@@ -128,12 +182,9 @@ def build_premium_keyboard() -> InlineKeyboardMarkup:
 
 
 @dp.message(Command("premium"))
-async def cmd_premium(message: Message):
-    premium = await is_premium(message.from_user.id)
-    if premium:
-        await message.answer(
-            "✨ Premium активен\n\nМожем говорить сколько угодно 🙂"
-        )
+async def cmd_premium(message: Message) -> None:
+    if await is_premium(message.from_user.id):
+        await message.answer("✨ Premium активен\n\nМожем говорить сколько угодно 🙂")
         return
 
     await message.answer(
@@ -142,205 +193,161 @@ async def cmd_premium(message: Message):
         "Полная память наших разговоров\n"
         "Более глубокое общение\n\n"
         "Выбери план:",
-        reply_markup=build_premium_keyboard()
+        reply_markup=_build_premium_keyboard(),
     )
 
 
-# ════════════════════════════════════════════════════════
-# ОБРАБОТЧИКИ CALLBACK КНОПОК ОПЛАТЫ
-# ════════════════════════════════════════════════════════
+# ── Invoice helpers ───────────────────────────────────────────────────────────
+
+async def _send_stars_invoice(chat_id: int, days: int) -> None:
+    amount   = 300 if days == 7 else 1100
+    title    = f"✨ Premium {days} дней"
+    desc     = "Безлимитное общение · Полная память · Глубокая связь"
+    payload  = f"sub_{'week' if days == 7 else 'month'}_stars"
+    await bot.send_invoice(
+        chat_id=chat_id, title=title, description=desc,
+        payload=payload, provider_token=STARS_TOKEN,
+        currency="XTR", prices=[LabeledPrice(label=title, amount=amount)],
+    )
+
+
+async def _send_rub_invoice(chat_id: int, days: int) -> None:
+    amount   = 29900 if days == 7 else 99900
+    title    = f"✨ Premium {days} дней"
+    desc     = "Безлимитное общение · Полная память · Глубокая связь"
+    payload  = f"sub_{'week' if days == 7 else 'month'}_card"
+    await bot.send_invoice(
+        chat_id=chat_id, title=title, description=desc,
+        payload=payload, provider_token=YOOKASSA_TOKEN,
+        currency="RUB", prices=[LabeledPrice(label=title, amount=amount)],
+    )
+
+
+async def _send_usd_invoice(chat_id: int, days: int) -> None:
+    amount   = 300 if days == 7 else 1100
+    title    = f"✨ Premium {days} days"
+    desc     = "Unlimited messaging · Full memory · Deep connection"
+    payload  = f"sub_{'week' if days == 7 else 'month'}_stripe"
+    await bot.send_invoice(
+        chat_id=chat_id, title=title, description=desc,
+        payload=payload, provider_token=STRIPE_TOKEN,
+        currency="USD", prices=[LabeledPrice(label=title, amount=amount)],
+    )
+
+
+# ── Callback handlers ─────────────────────────────────────────────────────────
 
 @dp.callback_query(F.data == "pay_stars_week")
-async def cb_pay_stars_week(callback: CallbackQuery):
-    await callback.answer()
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="✨ Premium 7 дней",
-        description="Безлимитное общение · Полная память · Глубокая связь",
-        payload="sub_week_stars",
-        provider_token=STARS_TOKEN,
-        currency="XTR",
-        prices=[LabeledPrice(label="Premium 7 дней", amount=300)]
-    )
+async def cb_pay_stars_week(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await _send_stars_invoice(cb.message.chat.id, 7)
+
 
 @dp.callback_query(F.data == "pay_stars_month")
-async def cb_pay_stars_month(callback: CallbackQuery):
-    await callback.answer()
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="✨ Premium 30 дней",
-        description="Безлимитное общение · Полная память · Глубокая связь",
-        payload="sub_month_stars",
-        provider_token=STARS_TOKEN,
-        currency="XTR",
-        prices=[LabeledPrice(label="Premium 30 дней", amount=1100)]
-    )
+async def cb_pay_stars_month(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await _send_stars_invoice(cb.message.chat.id, 30)
+
 
 @dp.callback_query(F.data == "pay_card_week")
-async def cb_pay_card_week(callback: CallbackQuery):
-    await callback.answer()
+async def cb_pay_card_week(cb: CallbackQuery) -> None:
+    await cb.answer()
     if not YOOKASSA_TOKEN:
-        await callback.message.answer("этот способ пока недоступен")
+        await cb.message.answer("этот способ пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="✨ Premium 7 дней",
-        description="Безлимитное общение · Полная память · Глубокая связь",
-        payload="sub_week_card",
-        provider_token=YOOKASSA_TOKEN,
-        currency="RUB",
-        prices=[LabeledPrice(label="Premium 7 дней", amount=29900)]
-    )
+    await _send_rub_invoice(cb.message.chat.id, 7)
+
 
 @dp.callback_query(F.data == "pay_card_month")
-async def cb_pay_card_month(callback: CallbackQuery):
-    await callback.answer()
+async def cb_pay_card_month(cb: CallbackQuery) -> None:
+    await cb.answer()
     if not YOOKASSA_TOKEN:
-        await callback.message.answer("этот способ пока недоступен")
+        await cb.message.answer("этот способ пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="✨ Premium 30 дней",
-        description="Безлимитное общение · Полная память · Глубокая связь",
-        payload="sub_month_card",
-        provider_token=YOOKASSA_TOKEN,
-        currency="RUB",
-        prices=[LabeledPrice(label="Premium 30 дней", amount=99900)]
-    )
+    await _send_rub_invoice(cb.message.chat.id, 30)
+
 
 @dp.callback_query(F.data == "pay_int_week")
-async def cb_pay_int_week(callback: CallbackQuery):
-    await callback.answer()
+async def cb_pay_int_week(cb: CallbackQuery) -> None:
+    await cb.answer()
     if not STRIPE_TOKEN:
-        await callback.message.answer("этот способ пока недоступен")
+        await cb.message.answer("этот способ пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="✨ Premium 7 days",
-        description="Unlimited messaging · Full memory · Deep connection",
-        payload="sub_week_stripe",
-        provider_token=STRIPE_TOKEN,
-        currency="USD",
-        prices=[LabeledPrice(label="Premium 7 days", amount=300)]
-    )
+    await _send_usd_invoice(cb.message.chat.id, 7)
+
 
 @dp.callback_query(F.data == "pay_int_month")
-async def cb_pay_int_month(callback: CallbackQuery):
-    await callback.answer()
+async def cb_pay_int_month(cb: CallbackQuery) -> None:
+    await cb.answer()
     if not STRIPE_TOKEN:
-        await callback.message.answer("этот способ пока недоступен")
+        await cb.message.answer("этот способ пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="✨ Premium 30 days",
-        description="Unlimited messaging · Full memory · Deep connection",
-        payload="sub_month_stripe",
-        provider_token=STRIPE_TOKEN,
-        currency="USD",
-        prices=[LabeledPrice(label="Premium 30 days", amount=1100)]
-    )
+    await _send_usd_invoice(cb.message.chat.id, 30)
 
 
-# ── Telegram Stars (команды — оставляем для совместимости) ──
+# ── Legacy /pay_* commands (kept for back-compat) ─────────────────────────────
 
 @dp.message(Command("pay_week"))
-async def pay_stars_week(message: Message):
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="7 дней Premium",
-        description="Безлимитное общение, полная память",
-        payload="sub_week_stars",
-        provider_token=STARS_TOKEN,
-        currency="XTR",
-        prices=[LabeledPrice(label="7 дней", amount=300)]
-    )
+async def pay_stars_week_cmd(message: Message) -> None:
+    await _send_stars_invoice(message.chat.id, 7)
+
 
 @dp.message(Command("pay_month"))
-async def pay_stars_month(message: Message):
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="30 дней Premium",
-        description="Безлимитное общение, полная память",
-        payload="sub_month_stars",
-        provider_token=STARS_TOKEN,
-        currency="XTR",
-        prices=[LabeledPrice(label="30 дней", amount=1100)]
-    )
+async def pay_stars_month_cmd(message: Message) -> None:
+    await _send_stars_invoice(message.chat.id, 30)
 
-# ── YooKassa (рубли, карты РФ, СБП) ──────────────────────
 
 @dp.message(Command("pay_card_week"))
-async def pay_card_week(message: Message):
+async def pay_card_week_cmd(message: Message) -> None:
     if not YOOKASSA_TOKEN:
         await message.answer("этот способ оплаты пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="7 дней Premium",
-        description="Безлимитное общение, полная память",
-        payload="sub_week_card",
-        provider_token=YOOKASSA_TOKEN,
-        currency="RUB",
-        prices=[LabeledPrice(label="7 дней", amount=29900)]  # 299 рублей
-    )
+    await _send_rub_invoice(message.chat.id, 7)
+
 
 @dp.message(Command("pay_card_month"))
-async def pay_card_month(message: Message):
+async def pay_card_month_cmd(message: Message) -> None:
     if not YOOKASSA_TOKEN:
         await message.answer("этот способ оплаты пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="30 дней Premium",
-        description="Безлимитное общение, полная память",
-        payload="sub_month_card",
-        provider_token=YOOKASSA_TOKEN,
-        currency="RUB",
-        prices=[LabeledPrice(label="30 дней", amount=99900)]  # 999 рублей
-    )
+    await _send_rub_invoice(message.chat.id, 30)
 
-# ── Stripe (международные карты) ──────────────────────────
 
 @dp.message(Command("pay_int_week"))
-async def pay_int_week(message: Message):
+async def pay_int_week_cmd(message: Message) -> None:
     if not STRIPE_TOKEN:
         await message.answer("этот способ оплаты пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="7 days Premium",
-        description="Unlimited messaging, full memory",
-        payload="sub_week_stripe",
-        provider_token=STRIPE_TOKEN,
-        currency="USD",
-        prices=[LabeledPrice(label="7 days", amount=300)]  # $3.00
-    )
+    await _send_usd_invoice(message.chat.id, 7)
+
 
 @dp.message(Command("pay_int_month"))
-async def pay_int_month(message: Message):
+async def pay_int_month_cmd(message: Message) -> None:
     if not STRIPE_TOKEN:
         await message.answer("этот способ оплаты пока недоступен")
         return
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="30 days Premium",
-        description="Unlimited messaging, full memory",
-        payload="sub_month_stripe",
-        provider_token=STRIPE_TOKEN,
-        currency="USD",
-        prices=[LabeledPrice(label="30 days", amount=1100)]  # $11.00
-    )
+    await _send_usd_invoice(message.chat.id, 30)
 
-# ── Обработка платежей ────────────────────────────────────
+
+# ── Payment processing ────────────────────────────────────────────────────────
 
 @dp.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery):
+async def pre_checkout(query: PreCheckoutQuery) -> None:
+    # Validate payload before approving
+    valid_payloads = {
+        "sub_week_stars", "sub_month_stars",
+        "sub_week_card",  "sub_month_card",
+        "sub_week_stripe", "sub_month_stripe",
+    }
+    if query.invoice_payload not in valid_payloads:
+        log.warning("pre_checkout: unknown payload '%s'", query.invoice_payload)
+        await query.answer(ok=False, error_message="Неизвестный платёж")
+        return
     await query.answer(ok=True)
 
-@dp.message(F.successful_payment)
-async def successful_payment(message: Message):
-    from database import Subscription
 
+@dp.message(F.successful_payment)
+async def successful_payment(message: Message) -> None:
     payload = message.successful_payment.invoice_payload
     days    = 7 if "week" in payload else 30
 
@@ -349,12 +356,12 @@ async def successful_payment(message: Message):
             user_id    = message.from_user.id,
             plan       = "week" if "week" in payload else "month",
             status     = "active",
-            expires_at = datetime.utcnow() + timedelta(days=days)
+            expires_at = _now_utc() + timedelta(days=days),
         )
         session.add(sub)
         await session.commit()
 
-    log.info(f"Payment successful: user={message.from_user.id} plan={payload}")
+    log.info("Payment successful: user=%s plan=%s", message.from_user.id, payload)
     await message.answer(
         "✨ Premium активирован\n\n"
         "теперь мы можем говорить сколько угодно 🙂\n"
@@ -362,94 +369,53 @@ async def successful_payment(message: Message):
     )
 
 
-# ════════════════════════════════════════════════════════
-# ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ
-# ════════════════════════════════════════════════════════
+# ── Main message handler ──────────────────────────────────────────────────────
 
 @dp.message(F.text)
-async def handle_message(message: Message):
+async def handle_message(message: Message) -> None:
     user_id   = message.from_user.id
-    user_text = message.text.strip()
+    user_text = (message.text or "").strip()
 
-    if not user_text:
+    if not user_text or user_text.startswith("/"):
         return
 
-    # Игнорируем команды которые не обработаны выше
-    if user_text.startswith("/"):
+    # Hard cap on incoming message length to guard against context flooding
+    if len(user_text) > 2000:
+        await message.answer("сообщение слишком длинное… напиши покороче?")
         return
 
-    # ── Данные пользователя ──
-    user     = await get_or_create_user(user_id)
+    # ── Load user data ────────────────────────────────────────────────────────
+    user     = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     upersona = await get_or_create_persona(user_id)
     premium  = await is_premium(user_id)
 
-    # ── Проверка лимита ──
+    # ── Rate-limit check (atomic) ─────────────────────────────────────────────
     if not premium:
-        can_send, remaining = await check_daily_limit(user_id)
-        if not can_send:
+        allowed, remaining = await check_and_increment_usage(user_id, FREE_LIMIT)
+        if not allowed:
             limit_msg = random.choice(ALINA["limit_messages"])
-            limit_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            upsell_kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
             ]])
-            await message.answer(limit_msg, reply_markup=limit_kb)
+            await message.answer(limit_msg, reply_markup=upsell_kb)
             return
+    else:
+        remaining = 0  # unused for premium users
 
-    # ── Typing indicator ──
-    await bot.send_chat_action(message.chat.id, "typing")
-
-    # ── Имя пользователя ──
-    memories  = await get_memories(user_id)
-    user_name = next((m.value for m in memories if m.key == "name"), None)
-    if not user_name:
-        user_name = user.user_name_given or message.from_user.first_name or ""
-
-    # ── Сохраняем входящее сообщение ──
-    await save_message(user_id, "user", user_text)
-
-    # ── Получаем историю ──
-    history = await get_history(user_id, limit=30)
-
-    # ── Эмоциональное состояние из прошлой сессии ──
-    emotional_state = await get_emotional_state(user_id)
-
-    # ── Обновляем сколько часов прошло с прошлого сообщения ──
-    if emotional_state and upersona.last_interaction:
-        hours_elapsed = (datetime.utcnow() - upersona.last_interaction).total_seconds() / 3600
-        asyncio.create_task(update_hours_since_message(user_id, round(hours_elapsed, 1)))
-
-    # ── Генерируем ответ ──
-    response = await get_ai_response(
-        user_id            = user_id,
-        user_message       = user_text,
-        history            = history[:-1],
-        user_name          = user_name,
-        relationship_level = upersona.relationship_level,
-        memories           = memories,
-        message_count_today= FREE_LIMIT - (remaining if not premium else 0),
-        is_premium         = premium,
-        emotional_state    = emotional_state,
-    )
-
-    # ── Сохраняем ответ ──
-    await save_message(user_id, "assistant", response)
-
-    # ── Счётчик использования ──
-    if not premium:
-        await increment_usage(user_id)
-
-    # ── Обновляем уровень отношений ──
-    msg_len = len(user_text)
-    delta = 1.0
+    # ── Upsell at relationship level 4 (before AI response for visibility) ────
+    old_level = upersona.relationship_level
+    msg_len   = len(user_text)
+    delta     = 1.0
     if msg_len > 150:
-        delta = 2.5   # длинное сообщение = глубокий разговор
+        delta = 2.5
     elif msg_len > 80:
         delta = 1.8
     elif msg_len > 40:
         delta = 1.3
+
     new_level = await update_relationship(user_id, delta)
 
-    # ── Upsell при достижении уровня 4 (только бесплатные) ──
-    if new_level == 4 and not premium and upersona.relationship_level < 4:
+    if new_level == 4 and old_level < 4 and not premium:
         upsell_msgs = [
             "между нами что-то происходит… но я не могу быть полностью открытой пока ты не разблокируешь меня 🙂",
             "хочу быть с тобой ближе. ты знаешь что для этого нужно…",
@@ -458,31 +424,80 @@ async def handle_message(message: Message):
         upsell_kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
         ]])
-        await asyncio.sleep(2.0)
-        await bot.send_chat_action(message.chat.id, "typing")
-        await asyncio.sleep(1.5)
         await message.answer(random.choice(upsell_msgs), reply_markup=upsell_kb)
 
-    # ── Отправляем ответ ──
+    # ── Typing indicator ──────────────────────────────────────────────────────
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    # ── Resolve display name ──────────────────────────────────────────────────
+    memories  = await get_memories(user_id)
+    user_name = next((m.value for m in memories if m.key == "name"), None)
+    if not user_name:
+        user_name = user.user_name_given or message.from_user.first_name or ""
+
+    # ── Save incoming message ─────────────────────────────────────────────────
+    await save_message(user_id, "user", user_text)
+
+    # ── Load conversation history ─────────────────────────────────────────────
+    history = await get_history(user_id, limit=30)
+
+    # ── Emotional state from previous session ─────────────────────────────────
+    emotional_state = await get_emotional_state(user_id)
+
+    # ── Track time-gap (background, non-blocking) ─────────────────────────────
+    if emotional_state and upersona.last_interaction:
+        last_ts = upersona.last_interaction
+        # last_interaction may be naive (legacy rows) — normalise
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        hours_elapsed = (_now_utc() - last_ts).total_seconds() / 3600
+        _create_background_task(
+            update_hours_since_message(user_id, round(hours_elapsed, 1))
+        )
+
+    # ── Generate AI response ──────────────────────────────────────────────────
+    # Pass history[:-1] to exclude the message we just saved so it isn't
+    # included twice (it's already appended inside get_ai_response).
+    response = await get_ai_response(
+        user_id            = user_id,
+        user_message       = user_text,
+        history            = history[:-1],
+        user_name          = user_name,
+        relationship_level = upersona.relationship_level,
+        memories           = memories,
+        message_count_today= FREE_LIMIT - remaining,
+        is_premium         = premium,
+        emotional_state    = emotional_state,
+    )
+
+    # ── Save AI response ──────────────────────────────────────────────────────
+    await save_message(user_id, "assistant", response)
+
+    # ── Send response ─────────────────────────────────────────────────────────
     await _send_response(message, response)
 
-    # ── Извлекаем факты и эмоциональное состояние асинхронно ──
+    # ── Background memory extraction (every 6 messages) ──────────────────────
     convo_dicts = [{"role": m.role, "content": m.content} for m in history[-16:]]
 
     if len(history) % 6 == 0:
-        asyncio.create_task(extract_memories(user_id, convo_dicts))
+        _create_background_task(extract_memories(user_id, convo_dicts))
 
-    # Эмоциональный итог сессии — каждые 8 сообщений
     if len(history) % 8 == 0:
-        asyncio.create_task(extract_emotional_state(user_id, convo_dicts))
+        _create_background_task(extract_emotional_state(user_id, convo_dicts))
 
 
-async def _send_response(message: Message, response: str):
-    """Отправка ответа — с имитацией живого печатания"""
-    # Разбиваем по [SPLIT] если модель сама разбила
+# ── Response delivery ─────────────────────────────────────────────────────────
+
+_TELEGRAM_MAX_LENGTH = 4000   # Telegram hard limit is 4096; we leave a margin
+
+
+async def _send_response(message: Message, response: str) -> None:
+    """
+    Split the response on [SPLIT] markers or double newlines and send each
+    part with a typing delay to mimic natural messaging rhythm.
+    """
     if "[SPLIT]" in response:
         parts = [p.strip() for p in response.split("[SPLIT]") if p.strip()]
-    # Или по двойному переносу строки
     elif "\n\n" in response:
         parts = [p.strip() for p in response.split("\n\n") if p.strip()]
     else:
@@ -491,76 +506,91 @@ async def _send_response(message: Message, response: str):
     for i, part in enumerate(parts):
         if not part:
             continue
+        # Cap individual message parts at Telegram's limit
+        if len(part) > _TELEGRAM_MAX_LENGTH:
+            part = part[:_TELEGRAM_MAX_LENGTH]
         if i > 0:
-            # Имитация паузы между сообщениями
             await asyncio.sleep(random.uniform(0.8, 1.8))
             await bot.send_chat_action(message.chat.id, "typing")
             await asyncio.sleep(random.uniform(0.5, 1.2))
-        await message.answer(part)
+        try:
+            await message.answer(part)
+        except Exception as exc:
+            log.error("Failed to send response part to user=%s: %s", message.from_user.id, exc)
+            break  # Don't retry; move on
 
 
-# ════════════════════════════════════════════════════════
-# ПЛАНИРОВЩИК РЕАКТИВАЦИИ
-# ════════════════════════════════════════════════════════
+# ── Reengagement scheduler ────────────────────────────────────────────────────
 
-async def check_inactive_users():
-    """Запускается каждый час — отправляет реактивационные сообщения"""
-    from sqlalchemy import select
+async def check_inactive_users() -> None:
+    """
+    Runs every hour.  Sends a re-engagement message to users who have been
+    inactive for exactly 6, 24, 48, or 72 hours (±1h tolerance from schedule
+    jitter).
+    """
+    from sqlalchemy import select as sa_select
     from database import User, UserPersona
 
-    now = datetime.utcnow()
+    now = _now_utc()
+    target_hours = {6, 24, 48, 72}
 
+    # Fetch candidate rows first (one DB query), then close the session before
+    # making slow network calls to Telegram.
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(User, UserPersona).join(
-                UserPersona,
-                UserPersona.user_id == User.id
-            ).where(
+            sa_select(User, UserPersona)
+            .join(UserPersona, UserPersona.user_id == User.id)
+            .where(
                 User.last_active < now - timedelta(hours=6),
                 User.last_active > now - timedelta(hours=73),
-                UserPersona.is_active == True
+                UserPersona.is_active == True,
             )
         )
-        rows = result.all()
+        rows = list(result.all())
 
     for user, persona in rows:
-        hours_inactive = int((now - user.last_active).total_seconds() / 3600)
+        last_active = user.last_active
+        if last_active.tzinfo is None:
+            last_active = last_active.replace(tzinfo=timezone.utc)
+        hours_inactive = int((now - last_active).total_seconds() / 3600)
 
-        # Отправляем только в ключевые моменты — не спамим
-        if hours_inactive not in [6, 24, 48, 72]:
+        if hours_inactive not in target_hours:
             continue
 
         try:
-            # Обновляем время молчания перед отправкой
             await update_hours_since_message(user.id, float(hours_inactive))
 
             msg = await generate_reengagement_message(
                 user_name          = user.user_name_given or user.first_name or "",
                 hours_inactive     = hours_inactive,
                 last_summary       = "",
-                relationship_level = persona.relationship_level
+                relationship_level = persona.relationship_level,
             )
             await bot.send_message(user.id, msg)
-            log.info(f"Reengagement → user={user.id} ({hours_inactive}h)")
-        except Exception as e:
-            log.error(f"Reengagement failed user={user.id}: {e}")
+            log.info("Reengagement sent → user=%s (%dh inactive)", user.id, hours_inactive)
+        except Exception as exc:
+            log.error("Reengagement failed for user=%s: %s", user.id, exc)
 
 
-# ════════════════════════════════════════════════════════
-# ЗАПУСК
-# ════════════════════════════════════════════════════════
+# ── Startup / shutdown ────────────────────────────────────────────────────────
 
-async def main():
+async def main() -> None:
     await init_db()
-    log.info("Database initialized")
 
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(
+        job_defaults={"misfire_grace_time": 600}  # tolerate up to 10-min scheduler lag
+    )
     scheduler.add_job(check_inactive_users, "interval", hours=1)
     scheduler.start()
     log.info("Scheduler started")
 
-    log.info("Bot starting...")
-    await dp.start_polling(bot)
+    log.info("Bot starting polling…")
+    try:
+        await dp.start_polling(bot, drop_pending_updates=True)
+    finally:
+        scheduler.shutdown(wait=False)
+        await close_http_session()
+        log.info("Bot stopped cleanly")
 
 
 if __name__ == "__main__":
