@@ -209,16 +209,55 @@ async def init_db() -> None:
         # 2. Inline-миграции: новые колонки в существующих таблицах
         #    IF NOT EXISTS — безопасно запускать повторно
         migrations = [
-            # users.is_blocked — добавлен в аудите v2
+            # ── Новые колонки ─────────────────────────────────────────────
             """ALTER TABLE users
                ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE""",
-            # messages.is_fallback — добавлен в аудите v2
             """ALTER TABLE messages
                ADD COLUMN IF NOT EXISTS is_fallback BOOLEAN NOT NULL DEFAULT FALSE""",
-            # subscriptions.telegram_charge_id — добавлен в аудите v2
             """ALTER TABLE subscriptions
                ADD COLUMN IF NOT EXISTS telegram_charge_id VARCHAR(100) DEFAULT NULL""",
-            # Уникальный индекс на telegram_charge_id (CREATE UNIQUE INDEX IF NOT EXISTS)
+
+            # ── Уникальные constraints (нужны для ON CONFLICT по имени) ──
+            # user_personas
+            """DO $$ BEGIN
+               IF NOT EXISTS (
+                   SELECT 1 FROM pg_constraint
+                   WHERE conname = 'uq_user_persona'
+               ) THEN
+                   ALTER TABLE user_personas
+                   ADD CONSTRAINT uq_user_persona UNIQUE (user_id, persona_id);
+               END IF;
+            END $$""",
+            # memories
+            """DO $$ BEGIN
+               IF NOT EXISTS (
+                   SELECT 1 FROM pg_constraint WHERE conname = 'uq_memory_key'
+               ) THEN
+                   ALTER TABLE memories
+                   ADD CONSTRAINT uq_memory_key UNIQUE (user_id, persona_id, key);
+               END IF;
+            END $$""",
+            # emotional_states
+            """DO $$ BEGIN
+               IF NOT EXISTS (
+                   SELECT 1 FROM pg_constraint WHERE conname = 'uq_emotional_state'
+               ) THEN
+                   ALTER TABLE emotional_states
+                   ADD CONSTRAINT uq_emotional_state UNIQUE (user_id, persona_id);
+               END IF;
+            END $$""",
+
+            # ── Индексы ───────────────────────────────────────────────────
+            """CREATE INDEX IF NOT EXISTS ix_user_persona_user_id
+               ON user_personas (user_id)""",
+            """CREATE INDEX IF NOT EXISTS ix_memories_user_id
+               ON memories (user_id)""",
+            """CREATE INDEX IF NOT EXISTS ix_emotional_states_user_id
+               ON emotional_states (user_id)""",
+            """CREATE INDEX IF NOT EXISTS ix_messages_user_persona
+               ON messages (user_id, persona_id)""",
+            """CREATE INDEX IF NOT EXISTS ix_subscriptions_user_id
+               ON subscriptions (user_id)""",
             """CREATE UNIQUE INDEX IF NOT EXISTS ix_subscriptions_charge_id
                ON subscriptions (telegram_charge_id)
                WHERE telegram_charge_id IS NOT NULL""",
@@ -312,7 +351,7 @@ async def get_or_create_persona(
     stmt = (
         pg_insert(UserPersona)
         .values(user_id=user_id, persona_id=persona_id)
-        .on_conflict_do_nothing(constraint="uq_user_persona")
+        .on_conflict_do_nothing(index_elements=["user_id", "persona_id"])
         .returning(
             UserPersona.id, UserPersona.user_id, UserPersona.persona_id,
             UserPersona.relationship_level, UserPersona.relationship_score,
@@ -423,7 +462,7 @@ async def save_memory(
         pg_insert(Memory)
         .values(user_id=user_id, persona_id=persona_id, key=key, value=value)
         .on_conflict_do_update(
-            constraint="uq_memory_key",
+            index_elements=["user_id", "persona_id", "key"],
             set_={"value": value},
         )
     )
@@ -651,7 +690,7 @@ async def save_emotional_state(
             updated_at=now,
         )
         .on_conflict_do_update(
-            constraint="uq_emotional_state",
+            index_elements=["user_id", "persona_id"],
             set_={
                 "mood_after_last_session":  mood_after_last_session,
                 "last_emotional_moment":    last_emotional_moment,
@@ -689,7 +728,7 @@ async def update_emotional_state_hours(
             updated_at=now,
         )
         .on_conflict_do_update(
-            constraint="uq_emotional_state",
+            index_elements=["user_id", "persona_id"],
             set_={
                 "hours_since_last_message": hours,
                 "updated_at": now,
