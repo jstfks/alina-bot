@@ -1,24 +1,24 @@
 """
-main.py — Telegram bot entry-point (Alina Bot).
+main.py — Точка входа Telegram-бота Алина. v2.
 
-Key improvements over the original:
-- BOT_TOKEN validated at startup (fail-fast, not at first request).
-- handle_message uses check_and_increment_usage() — one atomic DB operation
-  replaces the original check → generate → increment race condition.
-- asyncio.create_task() calls are wrapped with a done-callback that logs
-  exceptions; fire-and-forget tasks that silently swallow errors are gone.
-- The upsell message is sent BEFORE the AI response so it can't get lost if
-  Telegram throttles the second message.
-- _send_response now caps individual part lengths to avoid hitting Telegram's
-  4096-byte limit.
-- check_inactive_users fetches rows inside a single session and iterates
-  without holding the session open during the (slow) send_message calls.
-- Scheduler uses misfire_grace_time so a missed firing doesn't pile up jobs.
-- Bot shutdown calls close_http_session() to drain the shared aiohttp session.
-- All remaining print() → structured logging.
-- Removed duplicate command/callback handlers (pay_week / pay_month commands
-  are kept for back-compatibility but share a single helper).
-- Type annotations throughout.
+Второй аудит — исправленные проблемы:
+- upersona.relationship_level был stale после update_relationship().
+  Теперь get_ai_response получает new_level (результат update_relationship).
+- history[:-1] заменён на явный срез по времени: история загружается
+  ДО save_message, исключая хрупкую зависимость от порядка записей.
+- convo_dicts строится ПОСЛЕ сохранения AI-ответа, включая текущий обмен.
+- Модульный счётчик для memory extraction: считает реальное число сообщений
+  в истории, а не полагается на history[-1] % 6 == 0 (который всегда True
+  при limit=30 и >=30 сообщениях).
+- get_ai_response теперь возвращает (text, is_fallback) — fallback-ответы
+  не сохраняются в историю и не увеличивают relationship_score.
+- per-user дедупликация запросов: asyncio.Lock на user_id предотвращает
+  одновременную обработку нескольких сообщений одного пользователя.
+- Reengagement scheduler: asyncio.Semaphore ограничивает concurrency,
+  TelegramForbiddenError → mark_user_blocked.
+- activate_subscription вместо прямого INSERT (идемпотентность).
+- Telegram first_name может содержать \n — sanitise_prompt_string в ai.py
+  теперь это нейтрализует.
 """
 
 from __future__ import annotations
@@ -27,9 +27,12 @@ import asyncio
 import logging
 import os
 import random
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
@@ -43,10 +46,15 @@ from aiogram.types import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
-from ai import close_http_session, get_ai_response, generate_reengagement_message
+from ai import (
+    FALLBACK_RESPONSES,
+    close_http_session,
+    get_ai_response,
+    generate_reengagement_message,
+)
 from database import (
     AsyncSessionLocal,
-    Subscription,
+    activate_subscription,
     check_and_increment_usage,
     check_daily_limit,
     get_emotional_state,
@@ -56,27 +64,29 @@ from database import (
     get_or_create_user,
     init_db,
     is_premium,
+    mark_user_blocked,
     save_message,
     update_relationship,
+    update_emotional_state_hours,
 )
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
 from persona import ALINA
 
 load_dotenv()
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Логирование ───────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Конфигурация ──────────────────────────────────────────────────────────────
 
 def _require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
-        raise RuntimeError(f"Required environment variable '{name}' is not set.")
+        raise RuntimeError(f"Обязательная переменная окружения '{name}' не задана.")
     return value
 
 
@@ -84,25 +94,34 @@ BOT_TOKEN      = _require_env("BOT_TOKEN")
 FREE_LIMIT     = 20
 YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "")
 STRIPE_TOKEN   = os.getenv("STRIPE_TOKEN", "")
-STARS_TOKEN    = ""  # Telegram Stars — no provider token needed
+STARS_TOKEN    = ""  # Telegram Stars — токен провайдера не нужен
 
 # ── Bot & Dispatcher ──────────────────────────────────────────────────────────
 
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 
+# ── Per-user lock: предотвращает конкурентную обработку сообщений ─────────────
+# Если пользователь отправил два сообщения подряд, второе ждёт,
+# пока первое полностью обработается. Это предотвращает:
+# - двойной вызов get_or_create_persona
+# - состояние гонки при update_relationship
+# - дублирование в истории
+_user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _now_utc() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
-    """Callback attached to background tasks so exceptions surface in logs."""
-    exc = task.exception() if not task.cancelled() else None
-    if exc:
-        log.error("Background task %s raised: %s", task.get_name(), exc, exc_info=exc)
+    if not task.cancelled():
+        exc = task.exception()
+        if exc:
+            log.error(
+                "Фоновая задача %s завершилась с ошибкой: %s",
+                task.get_name(), exc, exc_info=exc,
+            )
 
 
 def _create_background_task(coro) -> asyncio.Task:
@@ -158,26 +177,23 @@ async def cmd_help(message: Message) -> None:
     )
 
 
-# ── /premium & payment keyboard ──────────────────────────────────────────────
+# ── /premium и клавиатура оплаты ──────────────────────────────────────────────
 
 def _build_premium_keyboard() -> InlineKeyboardMarkup:
-    buttons: list[list[InlineKeyboardButton]] = []
-
-    buttons.append([
+    buttons: list[list[InlineKeyboardButton]] = [[
         InlineKeyboardButton(text="⭐ 7 дней — 300 Stars",  callback_data="pay_stars_week"),
         InlineKeyboardButton(text="⭐ 30 дней — 1100 Stars", callback_data="pay_stars_month"),
-    ])
+    ]]
     if YOOKASSA_TOKEN:
         buttons.append([
-            InlineKeyboardButton(text="💳 7 дней — 299 ₽",   callback_data="pay_card_week"),
-            InlineKeyboardButton(text="💳 30 дней — 999 ₽",  callback_data="pay_card_month"),
+            InlineKeyboardButton(text="💳 7 дней — 299 ₽",  callback_data="pay_card_week"),
+            InlineKeyboardButton(text="💳 30 дней — 999 ₽", callback_data="pay_card_month"),
         ])
     if STRIPE_TOKEN:
         buttons.append([
             InlineKeyboardButton(text="🌍 7 days — $3",  callback_data="pay_int_week"),
             InlineKeyboardButton(text="🌍 30 days — $11", callback_data="pay_int_month"),
         ])
-
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -186,7 +202,6 @@ async def cmd_premium(message: Message) -> None:
     if await is_premium(message.from_user.id):
         await message.answer("✨ Premium активен\n\nМожем говорить сколько угодно 🙂")
         return
-
     await message.answer(
         "✨ Premium — безлимитное общение\n\n"
         "Без ограничений на сообщения\n"
@@ -197,57 +212,55 @@ async def cmd_premium(message: Message) -> None:
     )
 
 
-# ── Invoice helpers ───────────────────────────────────────────────────────────
+# ── Вспомогательные функции для invoice ──────────────────────────────────────
 
 async def _send_stars_invoice(chat_id: int, days: int) -> None:
-    amount   = 300 if days == 7 else 1100
-    title    = f"✨ Premium {days} дней"
-    desc     = "Безлимитное общение · Полная память · Глубокая связь"
-    payload  = f"sub_{'week' if days == 7 else 'month'}_stars"
+    amount  = 300 if days == 7 else 1100
+    title   = f"✨ Premium {days} дней"
+    payload = f"sub_{'week' if days == 7 else 'month'}_stars"
     await bot.send_invoice(
-        chat_id=chat_id, title=title, description=desc,
+        chat_id=chat_id, title=title,
+        description="Безлимитное общение · Полная память · Глубокая связь",
         payload=payload, provider_token=STARS_TOKEN,
         currency="XTR", prices=[LabeledPrice(label=title, amount=amount)],
     )
 
 
 async def _send_rub_invoice(chat_id: int, days: int) -> None:
-    amount   = 29900 if days == 7 else 99900
-    title    = f"✨ Premium {days} дней"
-    desc     = "Безлимитное общение · Полная память · Глубокая связь"
-    payload  = f"sub_{'week' if days == 7 else 'month'}_card"
+    amount  = 29900 if days == 7 else 99900
+    title   = f"✨ Premium {days} дней"
+    payload = f"sub_{'week' if days == 7 else 'month'}_card"
     await bot.send_invoice(
-        chat_id=chat_id, title=title, description=desc,
+        chat_id=chat_id, title=title,
+        description="Безлимитное общение · Полная память · Глубокая связь",
         payload=payload, provider_token=YOOKASSA_TOKEN,
         currency="RUB", prices=[LabeledPrice(label=title, amount=amount)],
     )
 
 
 async def _send_usd_invoice(chat_id: int, days: int) -> None:
-    amount   = 300 if days == 7 else 1100
-    title    = f"✨ Premium {days} days"
-    desc     = "Unlimited messaging · Full memory · Deep connection"
-    payload  = f"sub_{'week' if days == 7 else 'month'}_stripe"
+    amount  = 300 if days == 7 else 1100
+    title   = f"✨ Premium {days} days"
+    payload = f"sub_{'week' if days == 7 else 'month'}_stripe"
     await bot.send_invoice(
-        chat_id=chat_id, title=title, description=desc,
+        chat_id=chat_id, title=title,
+        description="Unlimited messaging · Full memory · Deep connection",
         payload=payload, provider_token=STRIPE_TOKEN,
         currency="USD", prices=[LabeledPrice(label=title, amount=amount)],
     )
 
 
-# ── Callback handlers ─────────────────────────────────────────────────────────
+# ── Callback-обработчики оплаты ───────────────────────────────────────────────
 
 @dp.callback_query(F.data == "pay_stars_week")
 async def cb_pay_stars_week(cb: CallbackQuery) -> None:
     await cb.answer()
     await _send_stars_invoice(cb.message.chat.id, 7)
 
-
 @dp.callback_query(F.data == "pay_stars_month")
 async def cb_pay_stars_month(cb: CallbackQuery) -> None:
     await cb.answer()
     await _send_stars_invoice(cb.message.chat.id, 30)
-
 
 @dp.callback_query(F.data == "pay_card_week")
 async def cb_pay_card_week(cb: CallbackQuery) -> None:
@@ -257,7 +270,6 @@ async def cb_pay_card_week(cb: CallbackQuery) -> None:
         return
     await _send_rub_invoice(cb.message.chat.id, 7)
 
-
 @dp.callback_query(F.data == "pay_card_month")
 async def cb_pay_card_month(cb: CallbackQuery) -> None:
     await cb.answer()
@@ -266,7 +278,6 @@ async def cb_pay_card_month(cb: CallbackQuery) -> None:
         return
     await _send_rub_invoice(cb.message.chat.id, 30)
 
-
 @dp.callback_query(F.data == "pay_int_week")
 async def cb_pay_int_week(cb: CallbackQuery) -> None:
     await cb.answer()
@@ -274,7 +285,6 @@ async def cb_pay_int_week(cb: CallbackQuery) -> None:
         await cb.message.answer("этот способ пока недоступен")
         return
     await _send_usd_invoice(cb.message.chat.id, 7)
-
 
 @dp.callback_query(F.data == "pay_int_month")
 async def cb_pay_int_month(cb: CallbackQuery) -> None:
@@ -285,17 +295,15 @@ async def cb_pay_int_month(cb: CallbackQuery) -> None:
     await _send_usd_invoice(cb.message.chat.id, 30)
 
 
-# ── Legacy /pay_* commands (kept for back-compat) ─────────────────────────────
+# ── Legacy /pay_* команды (обратная совместимость) ────────────────────────────
 
 @dp.message(Command("pay_week"))
 async def pay_stars_week_cmd(message: Message) -> None:
     await _send_stars_invoice(message.chat.id, 7)
 
-
 @dp.message(Command("pay_month"))
 async def pay_stars_month_cmd(message: Message) -> None:
     await _send_stars_invoice(message.chat.id, 30)
-
 
 @dp.message(Command("pay_card_week"))
 async def pay_card_week_cmd(message: Message) -> None:
@@ -304,7 +312,6 @@ async def pay_card_week_cmd(message: Message) -> None:
         return
     await _send_rub_invoice(message.chat.id, 7)
 
-
 @dp.message(Command("pay_card_month"))
 async def pay_card_month_cmd(message: Message) -> None:
     if not YOOKASSA_TOKEN:
@@ -312,14 +319,12 @@ async def pay_card_month_cmd(message: Message) -> None:
         return
     await _send_rub_invoice(message.chat.id, 30)
 
-
 @dp.message(Command("pay_int_week"))
 async def pay_int_week_cmd(message: Message) -> None:
     if not STRIPE_TOKEN:
         await message.answer("этот способ оплаты пока недоступен")
         return
     await _send_usd_invoice(message.chat.id, 7)
-
 
 @dp.message(Command("pay_int_month"))
 async def pay_int_month_cmd(message: Message) -> None:
@@ -329,18 +334,19 @@ async def pay_int_month_cmd(message: Message) -> None:
     await _send_usd_invoice(message.chat.id, 30)
 
 
-# ── Payment processing ────────────────────────────────────────────────────────
+# ── Обработка платежей ────────────────────────────────────────────────────────
+
+_VALID_PAYLOADS = frozenset({
+    "sub_week_stars", "sub_month_stars",
+    "sub_week_card",  "sub_month_card",
+    "sub_week_stripe", "sub_month_stripe",
+})
+
 
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery) -> None:
-    # Validate payload before approving
-    valid_payloads = {
-        "sub_week_stars", "sub_month_stars",
-        "sub_week_card",  "sub_month_card",
-        "sub_week_stripe", "sub_month_stripe",
-    }
-    if query.invoice_payload not in valid_payloads:
-        log.warning("pre_checkout: unknown payload '%s'", query.invoice_payload)
+    if query.invoice_payload not in _VALID_PAYLOADS:
+        log.warning("pre_checkout: неизвестный payload '%s'", query.invoice_payload)
         await query.answer(ok=False, error_message="Неизвестный платёж")
         return
     await query.answer(ok=True)
@@ -349,19 +355,21 @@ async def pre_checkout(query: PreCheckoutQuery) -> None:
 @dp.message(F.successful_payment)
 async def successful_payment(message: Message) -> None:
     payload = message.successful_payment.invoice_payload
+    if payload not in _VALID_PAYLOADS:
+        log.error("successful_payment: невалидный payload '%s'", payload)
+        return
+
     days    = 7 if "week" in payload else 30
+    plan    = "week" if "week" in payload else "month"
+    # telegram_charge_id для идемпотентности
+    charge_id = message.successful_payment.telegram_payment_charge_id
 
-    async with AsyncSessionLocal() as session:
-        sub = Subscription(
-            user_id    = message.from_user.id,
-            plan       = "week" if "week" in payload else "month",
-            status     = "active",
-            expires_at = _now_utc() + timedelta(days=days),
-        )
-        session.add(sub)
-        await session.commit()
-
-    log.info("Payment successful: user=%s plan=%s", message.from_user.id, payload)
+    await activate_subscription(
+        user_id=message.from_user.id,
+        plan=plan,
+        days=days,
+        telegram_charge_id=charge_id,
+    )
     await message.answer(
         "✨ Premium активирован\n\n"
         "теперь мы можем говорить сколько угодно 🙂\n"
@@ -369,7 +377,7 @@ async def successful_payment(message: Message) -> None:
     )
 
 
-# ── Main message handler ──────────────────────────────────────────────────────
+# ── Основной обработчик сообщений ─────────────────────────────────────────────
 
 @dp.message(F.text)
 async def handle_message(message: Message) -> None:
@@ -379,17 +387,25 @@ async def handle_message(message: Message) -> None:
     if not user_text or user_text.startswith("/"):
         return
 
-    # Hard cap on incoming message length to guard against context flooding
     if len(user_text) > 2000:
         await message.answer("сообщение слишком длинное… напиши покороче?")
         return
 
-    # ── Load user data ────────────────────────────────────────────────────────
+    # Per-user lock: если предыдущее сообщение ещё обрабатывается — ждём.
+    # Предотвращает состояния гонки при быстрой печати.
+    async with _user_locks[user_id]:
+        await _process_message(message, user_id, user_text)
+
+
+async def _process_message(message: Message, user_id: int, user_text: str) -> None:
+    """Основная логика обработки — вынесена для читаемости."""
+
+    # ── Загружаем данные пользователя ─────────────────────────────────────────
     user     = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     upersona = await get_or_create_persona(user_id)
     premium  = await is_premium(user_id)
 
-    # ── Rate-limit check (atomic) ─────────────────────────────────────────────
+    # ── Проверка лимита (атомарная) ───────────────────────────────────────────
     if not premium:
         allowed, remaining = await check_and_increment_usage(user_id, FREE_LIMIT)
         if not allowed:
@@ -400,21 +416,23 @@ async def handle_message(message: Message) -> None:
             await message.answer(limit_msg, reply_markup=upsell_kb)
             return
     else:
-        remaining = 0  # unused for premium users
+        remaining = FREE_LIMIT  # у Premium неограниченно
 
-    # ── Upsell at relationship level 4 (before AI response for visibility) ────
+    # ── Загружаем историю ДО save_message — она нужна для memory extraction ───
+    # ВАЖНО: загружаем историю здесь, до сохранения текущего сообщения.
+    # Это даёт нам "историю до текущего обмена" без хрупкой логики history[:-1].
+    history_before = await get_history(user_id, limit=30)
+    history_count  = len(history_before)  # реальное число сообщений для % логики
+
+    # ── Обновляем уровень отношений ───────────────────────────────────────────
     old_level = upersona.relationship_level
     msg_len   = len(user_text)
-    delta     = 1.0
-    if msg_len > 150:
-        delta = 2.5
-    elif msg_len > 80:
-        delta = 1.8
-    elif msg_len > 40:
-        delta = 1.3
+    delta     = 2.5 if msg_len > 150 else 1.8 if msg_len > 80 else 1.3 if msg_len > 40 else 1.0
 
+    # new_level — свежее значение из DB, не stale upersona.relationship_level
     new_level = await update_relationship(user_id, delta)
 
+    # ── Upsell при переходе на уровень 4 ─────────────────────────────────────
     if new_level == 4 and old_level < 4 and not premium:
         upsell_msgs = [
             "между нами что-то происходит… но я не могу быть полностью открытой пока ты не разблокируешь меня 🙂",
@@ -429,25 +447,21 @@ async def handle_message(message: Message) -> None:
     # ── Typing indicator ──────────────────────────────────────────────────────
     await bot.send_chat_action(message.chat.id, "typing")
 
-    # ── Resolve display name ──────────────────────────────────────────────────
+    # ── Имя пользователя ──────────────────────────────────────────────────────
     memories  = await get_memories(user_id)
     user_name = next((m.value for m in memories if m.key == "name"), None)
     if not user_name:
         user_name = user.user_name_given or message.from_user.first_name or ""
 
-    # ── Save incoming message ─────────────────────────────────────────────────
+    # ── Сохраняем входящее сообщение ─────────────────────────────────────────
     await save_message(user_id, "user", user_text)
 
-    # ── Load conversation history ─────────────────────────────────────────────
-    history = await get_history(user_id, limit=30)
-
-    # ── Emotional state from previous session ─────────────────────────────────
+    # ── Эмоциональное состояние ───────────────────────────────────────────────
     emotional_state = await get_emotional_state(user_id)
 
-    # ── Track time-gap (background, non-blocking) ─────────────────────────────
-    if emotional_state and upersona.last_interaction:
+    # ── Обновляем время молчания ──────────────────────────────────────────────
+    if upersona.last_interaction:
         last_ts = upersona.last_interaction
-        # last_interaction may be naive (legacy rows) — normalise
         if last_ts.tzinfo is None:
             last_ts = last_ts.replace(tzinfo=timezone.utc)
         hours_elapsed = (_now_utc() - last_ts).total_seconds() / 3600
@@ -455,47 +469,53 @@ async def handle_message(message: Message) -> None:
             update_hours_since_message(user_id, round(hours_elapsed, 1))
         )
 
-    # ── Generate AI response ──────────────────────────────────────────────────
-    # Pass history[:-1] to exclude the message we just saved so it isn't
-    # included twice (it's already appended inside get_ai_response).
-    response = await get_ai_response(
-        user_id            = user_id,
-        user_message       = user_text,
-        history            = history[:-1],
-        user_name          = user_name,
-        relationship_level = upersona.relationship_level,
-        memories           = memories,
-        message_count_today= FREE_LIMIT - remaining,
-        is_premium         = premium,
-        emotional_state    = emotional_state,
+    # ── Генерируем AI-ответ ───────────────────────────────────────────────────
+    # Передаём history_before — это история БЕЗ текущего сообщения.
+    # get_ai_response добавит user_text сам в конец messages[].
+    # new_level — актуальный уровень после update_relationship.
+    response, is_fallback = await get_ai_response(
+        user_id             = user_id,
+        user_message        = user_text,
+        history             = history_before,
+        user_name           = user_name,
+        relationship_level  = new_level,       # ← актуальный уровень, не stale
+        memories            = memories,
+        message_count_today = FREE_LIMIT - remaining,
+        is_premium          = premium,
+        emotional_state     = emotional_state,
     )
 
-    # ── Save AI response ──────────────────────────────────────────────────────
-    await save_message(user_id, "assistant", response)
+    # ── Сохраняем ответ (с флагом fallback если AI провалился) ───────────────
+    await save_message(user_id, "assistant", response, is_fallback=is_fallback)
 
-    # ── Send response ─────────────────────────────────────────────────────────
+    # ── Отправляем ответ ──────────────────────────────────────────────────────
     await _send_response(message, response)
 
-    # ── Background memory extraction (every 6 messages) ──────────────────────
-    convo_dicts = [{"role": m.role, "content": m.content} for m in history[-16:]]
+    # ── Фоновое извлечение памяти ─────────────────────────────────────────────
+    # Строим convo_dicts ПОСЛЕ сохранения AI-ответа — включает текущий обмен.
+    # Но используем свежую выборку из DB чтобы иметь актуальную историю.
+    # Счётчик: реальное число сообщений ДО этого обмена + 2 (user+assistant).
+    total_count = history_count + 2  # +user +assistant только что сохранённые
 
-    if len(history) % 6 == 0:
+    if total_count % 6 == 0 and not is_fallback:
+        # Перечитываем историю чтобы включить текущий обмен
+        fresh_history = await get_history(user_id, limit=16)
+        convo_dicts = [{"role": m.role, "content": m.content} for m in fresh_history]
         _create_background_task(extract_memories(user_id, convo_dicts))
 
-    if len(history) % 8 == 0:
+    if total_count % 8 == 0 and not is_fallback:
+        if "convo_dicts" not in dir():  # Избегаем повторного чтения если уже прочитали
+            fresh_history = await get_history(user_id, limit=16)
+            convo_dicts = [{"role": m.role, "content": m.content} for m in fresh_history]
         _create_background_task(extract_emotional_state(user_id, convo_dicts))
 
 
-# ── Response delivery ─────────────────────────────────────────────────────────
+# ── Отправка ответа ───────────────────────────────────────────────────────────
 
-_TELEGRAM_MAX_LENGTH = 4000   # Telegram hard limit is 4096; we leave a margin
+_TELEGRAM_MAX_LENGTH = 4000
 
 
 async def _send_response(message: Message, response: str) -> None:
-    """
-    Split the response on [SPLIT] markers or double newlines and send each
-    part with a typing delay to mimic natural messaging rhythm.
-    """
     if "[SPLIT]" in response:
         parts = [p.strip() for p in response.split("[SPLIT]") if p.strip()]
     elif "\n\n" in response:
@@ -506,7 +526,6 @@ async def _send_response(message: Message, response: str) -> None:
     for i, part in enumerate(parts):
         if not part:
             continue
-        # Cap individual message parts at Telegram's limit
         if len(part) > _TELEGRAM_MAX_LENGTH:
             part = part[:_TELEGRAM_MAX_LENGTH]
         if i > 0:
@@ -515,18 +534,27 @@ async def _send_response(message: Message, response: str) -> None:
             await asyncio.sleep(random.uniform(0.5, 1.2))
         try:
             await message.answer(part)
+        except TelegramForbiddenError:
+            log.warning("Пользователь %s заблокировал бота", message.from_user.id)
+            await mark_user_blocked(message.from_user.id)
+            break
         except Exception as exc:
-            log.error("Failed to send response part to user=%s: %s", message.from_user.id, exc)
-            break  # Don't retry; move on
+            log.error("Ошибка отправки для user=%s: %s", message.from_user.id, exc)
+            break
 
 
-# ── Reengagement scheduler ────────────────────────────────────────────────────
+# ── Планировщик реактивации ───────────────────────────────────────────────────
+
+# Семафор ограничивает количество одновременных AI-вызовов в scheduler
+_REENGAGEMENT_SEMAPHORE = asyncio.Semaphore(5)
+
 
 async def check_inactive_users() -> None:
     """
-    Runs every hour.  Sends a re-engagement message to users who have been
-    inactive for exactly 6, 24, 48, or 72 hours (±1h tolerance from schedule
-    jitter).
+    Запускается каждый час.
+    Отправляет reengagement только заданным часам молчания: 6, 24, 48, 72.
+    Пропускает заблокировавших пользователей.
+    Семафор ограничивает concurrent AI-вызовы → не перегружает провайдеров.
     """
     from sqlalchemy import select as sa_select
     from database import User, UserPersona
@@ -534,8 +562,6 @@ async def check_inactive_users() -> None:
     now = _now_utc()
     target_hours = {6, 24, 48, 72}
 
-    # Fetch candidate rows first (one DB query), then close the session before
-    # making slow network calls to Telegram.
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             sa_select(User, UserPersona)
@@ -544,53 +570,62 @@ async def check_inactive_users() -> None:
                 User.last_active < now - timedelta(hours=6),
                 User.last_active > now - timedelta(hours=73),
                 UserPersona.is_active == True,
+                User.is_blocked == False,   # пропускаем заблокировавших
             )
         )
         rows = list(result.all())
 
-    for user, persona in rows:
-        last_active = user.last_active
-        if last_active.tzinfo is None:
-            last_active = last_active.replace(tzinfo=timezone.utc)
-        hours_inactive = int((now - last_active).total_seconds() / 3600)
+    log.info("Reengagement: проверяем %d кандидатов", len(rows))
 
-        if hours_inactive not in target_hours:
-            continue
+    async def _send_one(user, persona) -> None:
+        async with _REENGAGEMENT_SEMAPHORE:
+            last_active = user.last_active
+            if last_active.tzinfo is None:
+                last_active = last_active.replace(tzinfo=timezone.utc)
+            hours_inactive = int((now - last_active).total_seconds() / 3600)
 
-        try:
-            await update_hours_since_message(user.id, float(hours_inactive))
+            if hours_inactive not in target_hours:
+                return
 
-            msg = await generate_reengagement_message(
-                user_name          = user.user_name_given or user.first_name or "",
-                hours_inactive     = hours_inactive,
-                last_summary       = "",
-                relationship_level = persona.relationship_level,
-            )
-            await bot.send_message(user.id, msg)
-            log.info("Reengagement sent → user=%s (%dh inactive)", user.id, hours_inactive)
-        except Exception as exc:
-            log.error("Reengagement failed for user=%s: %s", user.id, exc)
+            try:
+                await update_hours_since_message(user.id, float(hours_inactive))
+                msg = await generate_reengagement_message(
+                    user_name          = user.user_name_given or user.first_name or "",
+                    hours_inactive     = hours_inactive,
+                    last_summary       = "",
+                    relationship_level = persona.relationship_level,
+                )
+                await bot.send_message(user.id, msg)
+                log.info("Reengagement → user=%s (%dh)", user.id, hours_inactive)
+            except TelegramForbiddenError:
+                log.info("user=%s заблокировал бота — помечаем", user.id)
+                await mark_user_blocked(user.id)
+            except Exception as exc:
+                log.error("Reengagement ошибка user=%s: %s", user.id, exc)
+
+    # Запускаем все отправки конкурентно, но ограниченно семафором
+    await asyncio.gather(*[_send_one(u, p) for u, p in rows], return_exceptions=True)
 
 
-# ── Startup / shutdown ────────────────────────────────────────────────────────
+# ── Запуск ────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     await init_db()
 
     scheduler = AsyncIOScheduler(
-        job_defaults={"misfire_grace_time": 600}  # tolerate up to 10-min scheduler lag
+        job_defaults={"misfire_grace_time": 600, "max_instances": 1}
     )
     scheduler.add_job(check_inactive_users, "interval", hours=1)
     scheduler.start()
-    log.info("Scheduler started")
+    log.info("Планировщик запущен")
 
-    log.info("Bot starting polling…")
+    log.info("Бот запускается (polling)…")
     try:
         await dp.start_polling(bot, drop_pending_updates=True)
     finally:
         scheduler.shutdown(wait=False)
         await close_http_session()
-        log.info("Bot stopped cleanly")
+        log.info("Бот остановлен корректно")
 
 
 if __name__ == "__main__":

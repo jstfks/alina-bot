@@ -1,21 +1,20 @@
 """
-ai.py — AI response generation with multi-provider fallback chain.
+ai.py — Генерация AI-ответов с цепочкой провайдеров. v2.
 
-Key improvements over the original:
-- A single shared aiohttp.ClientSession (via module-level singleton) instead of
-  opening a new TCP connection per request (massive performance & FD leak fix).
-- All `print()` calls replaced with structured logging.
-- session_message_count / toxicity_override were referenced in get_ai_response()
-  but never passed as arguments — now fixed.
-- Response validation: empty / whitespace-only replies are treated as failures.
-- Prompt-injection guard: user_name and memory values are clamped and cannot
-  contain sequences that would break out of the system prompt context.
-- Rate-limit / 429 responses are detected and the provider is skipped quickly
-  rather than waiting for a full timeout.
-- build_system_prompt moved to its own section with cleaner separation.
-- Reengagement prompt no longer sends the full conversation history as a system
-  prompt — a targeted one-shot is sufficient and far cheaper.
-- All type annotations added.
+Второй аудит — исправленные проблемы:
+- Gemini API-ключ убран из URL-параметра (был виден в логах/трейсах).
+  Теперь передаётся через заголовок x-goog-api-key.
+- _get_http_session защищена от гонки инициализации: asyncio.Lock
+  гарантирует, что только один корутин создаёт сессию.
+- build_system_prompt больше не падает с KeyError при отсутствии
+  persona['dialogue_rules'] — используем .get() с fallback.
+- _sanitise_prompt_string усилена: экранируются переносы строк
+  (критично для Telegram first_name), SYSTEM:, \n, нулевые байты.
+- Fallback-ответ помечается флагом is_fallback и НЕ передаётся
+  обратно в историю (обрабатывается в main.py + database.py).
+- Токены: system_prompt размер логируется для мониторинга.
+- history_to_messages: контент из DB усекается до 1000 символов
+  на сообщение — защита от накопления огромных сообщений в истории.
 """
 
 from __future__ import annotations
@@ -34,14 +33,14 @@ from memory import build_memory_prompt, build_emotional_state_prompt
 
 log = logging.getLogger(__name__)
 
-# ── API keys ──────────────────────────────────────────────────────────────────
+# ── API ключи ─────────────────────────────────────────────────────────────────
 
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY", "")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
-# ── Model identifiers ─────────────────────────────────────────────────────────
+# ── Модели ────────────────────────────────────────────────────────────────────
 
 DEEPSEEK_MODEL = "deepseek-chat"
 GEMINI_MODEL   = "gemini-2.5-flash"
@@ -55,33 +54,46 @@ OPENROUTER_FALLBACK_MODELS = [
     "meta-llama/llama-3.3-70b-instruct:free",
 ]
 
-# ── Shared HTTP session ───────────────────────────────────────────────────────
-# Lazily initialised so it lives inside the event loop.
+# ── Shared HTTP session с Lock для безопасной инициализации ──────────────────
 
 _http_session: Optional[aiohttp.ClientSession] = None
+_http_session_lock = asyncio.Lock()
 
 
 async def _get_http_session() -> aiohttp.ClientSession:
+    """
+    Потокобезопасная ленивая инициализация общей HTTP-сессии.
+    asyncio.Lock гарантирует, что только один корутин создаёт сессию,
+    даже если несколько корутинов вызовут _get_http_session одновременно.
+    """
     global _http_session
-    if _http_session is None or _http_session.closed:
-        connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
-        _http_session = aiohttp.ClientSession(connector=connector)
+    # Быстрая проверка без блокировки
+    if _http_session is not None and not _http_session.closed:
+        return _http_session
+    async with _http_session_lock:
+        # Повторная проверка внутри lock (double-checked locking)
+        if _http_session is None or _http_session.closed:
+            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+            _http_session = aiohttp.ClientSession(connector=connector)
     return _http_session
 
 
 async def close_http_session() -> None:
-    """Call during bot shutdown to drain open connections cleanly."""
+    """Вызывается при остановке бота для закрытия соединений."""
     global _http_session
-    if _http_session and not _http_session.closed:
-        await _http_session.close()
-        _http_session = None
+    async with _http_session_lock:
+        if _http_session and not _http_session.closed:
+            await _http_session.close()
+            _http_session = None
 
 
-# ── Low-level provider calls ──────────────────────────────────────────────────
+# ── Определение rate-limiting ─────────────────────────────────────────────────
 
 def _is_rate_limited(status: int) -> bool:
     return status in (429, 503)
 
+
+# ── Вызовы провайдеров ────────────────────────────────────────────────────────
 
 async def _call_deepseek(
     messages: list[dict],
@@ -91,12 +103,6 @@ async def _call_deepseek(
     if not DEEPSEEK_API_KEY:
         return None
     session = await _get_http_session()
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
     try:
         async with session.post(
             "https://api.deepseek.com/v1/chat/completions",
@@ -104,7 +110,12 @@ async def _call_deepseek(
                 "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json=payload,
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             if _is_rate_limited(resp.status):
@@ -112,7 +123,7 @@ async def _call_deepseek(
                 return None
             data = await resp.json()
             if "choices" not in data:
-                log.warning("[DeepSeek] unexpected response: %s", data.get("error"))
+                log.warning("[DeepSeek] неожиданный ответ: %s", data.get("error"))
                 return None
             text = data["choices"][0]["message"]["content"].strip()
             return text or None
@@ -120,7 +131,7 @@ async def _call_deepseek(
         log.warning("[DeepSeek] timeout")
         return None
     except Exception as exc:
-        log.warning("[DeepSeek] exception: %s", exc)
+        log.warning("[DeepSeek] исключение: %s", exc)
         return None
 
 
@@ -143,7 +154,7 @@ async def _call_gemini(
         elif role == "assistant":
             gemini_messages.append({"role": "model", "parts": [{"text": msg["content"]}]})
 
-    # Gemini requires strict user/model alternation
+    # Gemini требует строгого чередования user/model
     deduped: list[dict] = []
     for m in gemini_messages:
         if deduped and deduped[-1]["role"] == m["role"]:
@@ -154,23 +165,27 @@ async def _call_gemini(
     if not deduped or deduped[0]["role"] != "user":
         return None
 
-    payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": deduped,
-        "generationConfig": {
-            "maxOutputTokens": max_tokens,
-            "temperature": temperature,
-        },
-    }
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        f"{GEMINI_MODEL}:generateContent"
     )
     session = await _get_http_session()
     try:
         async with session.post(
             url,
-            json=payload,
+            # API-ключ в заголовке, а не в URL — не попадает в логи запросов
+            headers={
+                "x-goog-api-key": GEMINI_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": deduped,
+                "generationConfig": {
+                    "maxOutputTokens": max_tokens,
+                    "temperature": temperature,
+                },
+            },
             timeout=aiohttp.ClientTimeout(total=25),
         ) as resp:
             if _is_rate_limited(resp.status):
@@ -178,7 +193,7 @@ async def _call_gemini(
                 return None
             data = await resp.json()
             if "candidates" not in data:
-                log.warning("[Gemini] unexpected response: %s", data.get("error"))
+                log.warning("[Gemini] неожиданный ответ: %s", data.get("error"))
                 return None
             text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             return text or None
@@ -186,7 +201,7 @@ async def _call_gemini(
         log.warning("[Gemini] timeout")
         return None
     except Exception as exc:
-        log.warning("[Gemini] exception: %s", exc)
+        log.warning("[Gemini] исключение: %s", exc)
         return None
 
 
@@ -198,12 +213,6 @@ async def _call_groq(
     if not GROQ_API_KEY:
         return None
     session = await _get_http_session()
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
     try:
         async with session.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -211,7 +220,12 @@ async def _call_groq(
                 "Authorization": f"Bearer {GROQ_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json=payload,
+            json={
+                "model": GROQ_MODEL,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
             timeout=aiohttp.ClientTimeout(total=20),
         ) as resp:
             if _is_rate_limited(resp.status):
@@ -219,7 +233,7 @@ async def _call_groq(
                 return None
             data = await resp.json()
             if "choices" not in data:
-                log.warning("[Groq] unexpected response: %s", data.get("error"))
+                log.warning("[Groq] неожиданный ответ: %s", data.get("error"))
                 return None
             text = data["choices"][0]["message"]["content"].strip()
             return text or None
@@ -227,7 +241,7 @@ async def _call_groq(
         log.warning("[Groq] timeout")
         return None
     except Exception as exc:
-        log.warning("[Groq] exception: %s", exc)
+        log.warning("[Groq] исключение: %s", exc)
         return None
 
 
@@ -246,17 +260,16 @@ async def _call_openrouter(
         "X-Title": "Alina Bot",
     }
     for model in OPENROUTER_FALLBACK_MODELS:
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
         try:
             async with session.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
-                json=payload,
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
                 timeout=aiohttp.ClientTimeout(total=35),
             ) as resp:
                 if _is_rate_limited(resp.status):
@@ -271,64 +284,76 @@ async def _call_openrouter(
                     continue
                 text = data["choices"][0]["message"]["content"].strip()
                 if text:
-                    log.info("[OpenRouter] success via %s", model)
+                    log.info("[OpenRouter] успех: %s", model)
                     return text
         except asyncio.TimeoutError:
             log.warning("[OpenRouter] %s timeout", model)
             await asyncio.sleep(0.3)
         except Exception as exc:
-            log.warning("[OpenRouter] %s exception: %s", model, exc)
+            log.warning("[OpenRouter] %s исключение: %s", model, exc)
             await asyncio.sleep(0.3)
 
-    log.error("[OpenRouter] all models unavailable")
+    log.error("[OpenRouter] все модели недоступны")
     return None
 
 
-# ── Provider chain ────────────────────────────────────────────────────────────
+# ── Цепочка провайдеров ───────────────────────────────────────────────────────
 
 async def _route_and_call(
     messages: list[dict],
     max_tokens: int = 250,
     temperature: float = 0.92,
 ) -> Optional[str]:
-    """
-    Try each provider in priority order.  Returns the first non-None response.
-    """
     result = await _call_deepseek(messages, max_tokens, temperature)
     if result:
         return result
-    log.info("[route] DeepSeek unavailable → Gemini")
+    log.info("[route] DeepSeek недоступен → Gemini")
 
     result = await _call_gemini(messages, max_tokens, temperature)
     if result:
         return result
-    log.info("[route] Gemini unavailable → Groq/Kimi")
+    log.info("[route] Gemini недоступен → Groq/Kimi")
 
     result = await _call_groq(messages, max_tokens, temperature)
     if result:
         return result
-    log.info("[route] Groq unavailable → OpenRouter")
+    log.info("[route] Groq недоступен → OpenRouter")
 
     await asyncio.sleep(0.5)
     return await _call_openrouter(messages, max_tokens, temperature)
 
 
-# ── System-prompt builder ─────────────────────────────────────────────────────
-
-# Allowed mood values — used to sanitise DB-sourced data before it enters the prompt
-_VALID_MOODS = {"warm", "neutral", "cold", "conflict", "flirty"}
-
+# ── Санитизация строк для промпта ─────────────────────────────────────────────
 
 def _sanitise_prompt_string(value: str, max_len: int = 200) -> str:
     """
-    Strip control characters and cap length so that DB values or AI-extracted
-    fields cannot inject instructions into the system prompt.
-    """
-    # Remove null bytes and common injection sequences
-    cleaned = value.replace("\x00", "").replace("---", "–").strip()
-    # Hard-cap length
-    return cleaned[:max_len]
+    Очищает строку перед вставкой в системный промпт.
 
+    Угрозы:
+    - Переносы строк в имени (Telegram first_name может содержать \n)
+    - "SYSTEM:", "Инструкция:", "━━━" — инъекция директив
+    - Нулевые байты
+    - Управляющие символы
+
+    Стратегия: приводим к однострочному тексту, нейтрализуем маркеры.
+    """
+    if not value:
+        return ""
+    # Удаляем нулевые байты и управляющие символы (кроме пробела)
+    cleaned = "".join(
+        ch if ch >= " " or ch in ("\t",) else " "
+        for ch in value
+        if ch != "\x00"
+    )
+    # Переносы строк → пробел (имена из Telegram могут содержать \n)
+    cleaned = cleaned.replace("\n", " ").replace("\r", " ")
+    # Нейтрализуем паттерны инъекции директив
+    for marker in ("SYSTEM:", "Инструкция:", "system:", "━━━", "───", "---"):
+        cleaned = cleaned.replace(marker, "")
+    return cleaned.strip()[:max_len]
+
+
+# ── Системный промпт ──────────────────────────────────────────────────────────
 
 def build_system_prompt(
     user_name: str,
@@ -339,16 +364,14 @@ def build_system_prompt(
 ) -> str:
     persona = ALINA
 
-    # Clamp level to valid range
     level = max(1, min(5, relationship_level))
     rel_description = persona["relationship_levels"].get(
         level, persona["relationship_levels"][1]
     )
 
-    memory_block   = build_memory_prompt(memories)
+    memory_block    = build_memory_prompt(memories)
     emotional_block = build_emotional_state_prompt(emotional_state) if emotional_state else ""
 
-    # Alina lives in Moscow (UTC+3, no DST since 2014)
     MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
     now        = datetime.datetime.now(tz=MOSCOW)
     local_hour = now.hour
@@ -366,10 +389,8 @@ def build_system_prompt(
     else:
         time_of_day = "ночь"
 
-    # Sanitise user_name — it comes from DB / Telegram and could contain
-    # adversarial content intended to break the prompt
     safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
-    name_str = f"Его зовут {safe_name}." if safe_name else ""
+    name_str  = f"Его зовут {safe_name}." if safe_name else ""
 
     spontaneity = persona.get("daily_spontaneity", [])
     spontaneity_block = ""
@@ -383,6 +404,9 @@ def build_system_prompt(
     mood_block           = persona.get("mood_fluctuations", "")
     memory_pattern_block = persona.get("emotional_memory", "")
 
+    # .get() с fallback — KeyError больше невозможен даже если persona изменится
+    dialogue_rules = persona.get("dialogue_rules", "")
+
     system = f"""{persona['core_identity']}
 
 {persona['personality']}
@@ -393,7 +417,7 @@ def build_system_prompt(
 
 {mood_block}
 
-{persona['dialogue_rules']}
+{dialogue_rules}
 
 {spontaneity_block}
 
@@ -422,10 +446,37 @@ def build_system_prompt(
 
 1-3 предложения максимум. Никаких списков и заголовков."""
 
+    # Логируем приблизительный размер промпта для мониторинга токенов
+    prompt_chars = len(system)
+    if prompt_chars > 12000:
+        log.warning(
+            "Системный промпт очень большой: %d символов (~%d токенов) для user",
+            prompt_chars, prompt_chars // 4,
+        )
+
     return system
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def _history_to_messages(history: list, max_content_per_msg: int = 1000) -> list[dict]:
+    """
+    Конвертирует историю ORM-объектов в список dict для API.
+    Усекает каждое сообщение до max_content_per_msg символов —
+    защита от накопления огромных сообщений в истории (context flooding).
+    """
+    result = []
+    for msg in history[-30:]:
+        content = msg.content
+        if len(content) > max_content_per_msg:
+            content = content[:max_content_per_msg] + "…"
+        result.append({"role": msg.role, "content": content})
+    return result
+
+
+# ── Публичный API ─────────────────────────────────────────────────────────────
+
+# Sentinel — означает что все провайдеры упали
+FALLBACK_RESPONSES = ["секунду...", "подожди немного", "хм, дай подумаю"]
+
 
 async def get_ai_response(
     user_id: int,
@@ -437,8 +488,12 @@ async def get_ai_response(
     message_count_today: int = 0,
     is_premium: bool = False,
     emotional_state=None,
-) -> str:
-    # Free-tier users are capped at relationship level 3 in the prompt
+) -> tuple[str, bool]:
+    """
+    Возвращает (response_text, is_fallback).
+    is_fallback=True означает что все провайдеры упали — ответ не надо
+    сохранять в историю и не надо считать за "реальный обмен".
+    """
     effective_level = relationship_level if is_premium else min(relationship_level, 3)
 
     system_prompt = build_system_prompt(
@@ -450,17 +505,15 @@ async def get_ai_response(
     )
 
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
-    for msg in history[-30:]:
-        messages.append({"role": msg.role, "content": msg.content})
-    # User message capped to prevent context flooding
+    messages.extend(_history_to_messages(history))
     messages.append({"role": "user", "content": user_message[:2000]})
 
     result = await _route_and_call(messages)
     if result:
-        return result
+        return result, False
 
-    log.error("All AI providers failed for user=%s", user_id)
-    return random.choice(["секунду...", "подожди немного", "хм, дай подумаю"])
+    log.error("Все AI-провайдеры недоступны для user=%s", user_id)
+    return random.choice(FALLBACK_RESPONSES), True
 
 
 async def generate_reengagement_message(
@@ -480,7 +533,6 @@ async def generate_reengagement_message(
 
     safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
 
-    # Minimal one-shot prompt — no full system prompt needed for re-engagement
     prompt = (
         f"Ты — Алина. Напиши одно короткое сообщение пользователю {safe_name}. "
         f"Он не писал {hours_inactive} часов. "
