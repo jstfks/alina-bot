@@ -195,9 +195,38 @@ class Subscription(Base):
 # ── Schema init ───────────────────────────────────────────────────────────────
 
 async def init_db() -> None:
+    """
+    Создаёт таблицы (если не существуют) и применяет inline-миграции.
+
+    Вместо Alembic используем ADD COLUMN IF NOT EXISTS — это идемпотентно:
+    безопасно запускать при каждом старте, ничего не сломает если колонка
+    уже есть. Нужно для новых колонок добавленных аудитом в уже живые таблицы.
+    """
     async with engine.begin() as conn:
+        # 1. Создаём новые таблицы (существующие не трогает)
         await conn.run_sync(Base.metadata.create_all)
-    log.info("Database schema verified/created.")
+
+        # 2. Inline-миграции: новые колонки в существующих таблицах
+        #    IF NOT EXISTS — безопасно запускать повторно
+        migrations = [
+            # users.is_blocked — добавлен в аудите v2
+            """ALTER TABLE users
+               ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE""",
+            # messages.is_fallback — добавлен в аудите v2
+            """ALTER TABLE messages
+               ADD COLUMN IF NOT EXISTS is_fallback BOOLEAN NOT NULL DEFAULT FALSE""",
+            # subscriptions.telegram_charge_id — добавлен в аудите v2
+            """ALTER TABLE subscriptions
+               ADD COLUMN IF NOT EXISTS telegram_charge_id VARCHAR(100) DEFAULT NULL""",
+            # Уникальный индекс на telegram_charge_id (CREATE UNIQUE INDEX IF NOT EXISTS)
+            """CREATE UNIQUE INDEX IF NOT EXISTS ix_subscriptions_charge_id
+               ON subscriptions (telegram_charge_id)
+               WHERE telegram_charge_id IS NOT NULL""",
+        ]
+        for sql in migrations:
+            await conn.execute(text(sql))
+
+    log.info("Database schema verified/migrated.")
 
 
 # ── User ──────────────────────────────────────────────────────────────────────
