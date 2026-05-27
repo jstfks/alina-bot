@@ -48,10 +48,10 @@ from dotenv import load_dotenv
 
 from ai import (
     FALLBACK_RESPONSES,
-    close_http_session,
     get_ai_response,
     generate_reengagement_message,
 )
+from http_client import close_http_session
 from database import (
     AsyncSessionLocal,
     activate_subscription,

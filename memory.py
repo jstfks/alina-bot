@@ -30,8 +30,7 @@ from database import (
     save_emotional_state,
     update_emotional_state_hours,
 )
-# Явный импорт — нет silent fallback с отдельным пулом соединений
-from ai import _get_http_session
+from http_client import get_http_session
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +87,7 @@ def _parse_flat_dict(text: str) -> Optional[dict[str, str]]:
 async def _extract_via_groq(prompt: str) -> Optional[dict]:
     if not GROQ_API_KEY:
         return None
-    session = await _get_http_session()
+    session = await get_http_session()
     try:
         async with session.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -117,7 +116,7 @@ async def _extract_via_groq(prompt: str) -> Optional[dict]:
 async def _extract_via_openrouter(prompt: str) -> Optional[dict]:
     if not OPENROUTER_API_KEY:
         return None
-    session = await _get_http_session()
+    session = await get_http_session()
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",

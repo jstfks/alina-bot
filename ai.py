@@ -1,35 +1,28 @@
 """
-ai.py — Генерация AI-ответов с цепочкой провайдеров. v2.
+ai.py — Генерация AI-ответов с цепочкой провайдеров. v2.1 (hotfix).
 
-Второй аудит — исправленные проблемы:
-- Gemini API-ключ убран из URL-параметра (был виден в логах/трейсах).
-  Теперь передаётся через заголовок x-goog-api-key.
-- _get_http_session защищена от гонки инициализации: asyncio.Lock
-  гарантирует, что только один корутин создаёт сессию.
-- build_system_prompt больше не падает с KeyError при отсутствии
-  persona['dialogue_rules'] — используем .get() с fallback.
-- _sanitise_prompt_string усилена: экранируются переносы строк
-  (критично для Telegram first_name), SYSTEM:, \n, нулевые байты.
-- Fallback-ответ помечается флагом is_fallback и НЕ передаётся
-  обратно в историю (обрабатывается в main.py + database.py).
-- Токены: system_prompt размер логируется для мониторинга.
-- history_to_messages: контент из DB усекается до 1000 символов
-  на сообщение — защита от накопления огромных сообщений в истории.
+Исправлен циклический импорт:
+  ai.py → memory.py → ai.py  (ImportError при старте)
+
+Решение: HTTP-сессия вынесена в http_client.py.
+  ai.py     → http_client.py  (нет петли)
+  memory.py → http_client.py  (нет петли)
+
+Импорт memory (build_memory_prompt, build_emotional_state_prompt) перенесён
+внутрь функции build_system_prompt — на момент вызова оба модуля уже
+полностью загружены.
 """
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import logging
 import os
 import random
 from typing import Optional
 
-import aiohttp
-
 from persona import ALINA
-from memory import build_memory_prompt, build_emotional_state_prompt
+from http_client import get_http_session, close_http_session  # noqa: F401 (re-export)
 
 log = logging.getLogger(__name__)
 
@@ -54,38 +47,6 @@ OPENROUTER_FALLBACK_MODELS = [
     "meta-llama/llama-3.3-70b-instruct:free",
 ]
 
-# ── Shared HTTP session с Lock для безопасной инициализации ──────────────────
-
-_http_session: Optional[aiohttp.ClientSession] = None
-_http_session_lock = asyncio.Lock()
-
-
-async def _get_http_session() -> aiohttp.ClientSession:
-    """
-    Потокобезопасная ленивая инициализация общей HTTP-сессии.
-    asyncio.Lock гарантирует, что только один корутин создаёт сессию,
-    даже если несколько корутинов вызовут _get_http_session одновременно.
-    """
-    global _http_session
-    # Быстрая проверка без блокировки
-    if _http_session is not None and not _http_session.closed:
-        return _http_session
-    async with _http_session_lock:
-        # Повторная проверка внутри lock (double-checked locking)
-        if _http_session is None or _http_session.closed:
-            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
-            _http_session = aiohttp.ClientSession(connector=connector)
-    return _http_session
-
-
-async def close_http_session() -> None:
-    """Вызывается при остановке бота для закрытия соединений."""
-    global _http_session
-    async with _http_session_lock:
-        if _http_session and not _http_session.closed:
-            await _http_session.close()
-            _http_session = None
-
 
 # ── Определение rate-limiting ─────────────────────────────────────────────────
 
@@ -102,7 +63,7 @@ async def _call_deepseek(
 ) -> Optional[str]:
     if not DEEPSEEK_API_KEY:
         return None
-    session = await _get_http_session()
+    session = await get_http_session()
     try:
         async with session.post(
             "https://api.deepseek.com/v1/chat/completions",
@@ -169,7 +130,7 @@ async def _call_gemini(
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent"
     )
-    session = await _get_http_session()
+    session = await get_http_session()
     try:
         async with session.post(
             url,
@@ -212,7 +173,7 @@ async def _call_groq(
 ) -> Optional[str]:
     if not GROQ_API_KEY:
         return None
-    session = await _get_http_session()
+    session = await get_http_session()
     try:
         async with session.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -252,7 +213,7 @@ async def _call_openrouter(
 ) -> Optional[str]:
     if not OPENROUTER_API_KEY:
         return None
-    session = await _get_http_session()
+    session = await get_http_session()
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -362,6 +323,10 @@ def build_system_prompt(
     session_message_count: int = 0,
     emotional_state=None,
 ) -> str:
+    # Ленивый импорт: к моменту вызова оба модуля уже полностью загружены.
+    # На уровне модуля импортировать нельзя — circular import (ai <-> memory).
+    from memory import build_memory_prompt, build_emotional_state_prompt
+
     persona = ALINA
 
     level = max(1, min(5, relationship_level))
