@@ -43,11 +43,10 @@ GEMINI_MODEL   = "gemini-2.5-flash"
 GROQ_MODEL     = "moonshotai/kimi-k2-instruct"
 
 OPENROUTER_FALLBACK_MODELS = [
-    "deepseek/deepseek-v3-0324:free",
-    "meta-llama/llama-4-maverick:free",
-    "qwen/qwen3-235b-a22b:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
+    "deepseek/deepseek-v3-0324:free",        # лучший бесплатный для ролеплея на русском
+    "meta-llama/llama-4-maverick:free",       # резерв №1
+    "meta-llama/llama-3.3-70b-instruct:free", # резерв №2
+    "qwen/qwen3-235b-a22b:free",              # последний — генерирует <think> блоки
 ]
 
 
@@ -214,6 +213,24 @@ async def _call_groq(
         return None
 
 
+def _strip_think_tags(text: str) -> str:
+    """
+    Убирает <think>...</think> блоки из ответа.
+    Qwen3 и некоторые другие модели добавляют их когда "думают вслух".
+    Пользователь не должен видеть внутренние рассуждения модели.
+    Обрабатывает три варианта:
+      - <think>...</think>         — закрытый блок
+      - <think>...                 — незакрытый блок (модель не успела закрыть)
+      - пустой ответ после обрезки — возвращаем None-сигнал (пустую строку)
+    """
+    import re
+    # Закрытый блок — убираем целиком (DOTALL = включая переносы строк)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Незакрытый блок — убираем от <think> до конца строки
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
+
 async def _call_openrouter(
     messages: list[dict],
     max_tokens: int,
@@ -247,14 +264,25 @@ async def _call_openrouter(
                     continue
                 data = await resp.json()
                 if "choices" not in data:
-                    code = data.get("error", {}).get("code", "?")
-                    log.warning("[OpenRouter] %s failed (code %s)", model, code)
+                    err  = data.get("error", {})
+                    code = err.get("code", resp.status)
+                    msg  = str(err.get("message", ""))[:120]
+                    # 404 = модель снята с OpenRouter, не перегружена
+                    if resp.status == 404:
+                        log.warning("[OpenRouter] %s — модель не найдена (снята?): %s", model, msg)
+                    else:
+                        log.warning("[OpenRouter] %s — ошибка %s: %s", model, code, msg)
                     await asyncio.sleep(0.3)
                     continue
                 text = data["choices"][0]["message"]["content"].strip()
+                text = _strip_think_tags(text)
                 if text:
                     log.info("[OpenRouter] успех: %s", model)
                     return text
+                # После обрезки think-блоков ответ оказался пустым — пробуем следующую модель
+                log.warning("[OpenRouter] %s — пустой ответ после обрезки think-блоков", model)
+                await asyncio.sleep(0.3)
+                continue
         except asyncio.TimeoutError:
             log.warning("[OpenRouter] %s timeout", model)
             await asyncio.sleep(0.3)
