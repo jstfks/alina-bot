@@ -536,8 +536,6 @@ _TELEGRAM_MAX_LENGTH = 4000
 async def _send_response(message: Message, response: str) -> None:
     if "[SPLIT]" in response:
         parts = [p.strip() for p in response.split("[SPLIT]") if p.strip()]
-    elif "\n\n" in response:
-        parts = [p.strip() for p in response.split("\n\n") if p.strip()]
     else:
         parts = [response.strip()]
 
