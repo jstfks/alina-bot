@@ -405,16 +405,31 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     upersona = await get_or_create_persona(user_id)
     premium  = await is_premium(user_id)
 
-    # ── Проверка лимита (атомарная) ───────────────────────────────────────────
+    # ── Проверка лимита (атомарная, двухэтапная) ────────────────────────────────
+    # Этап 1: на 15-м сообщении Алина говорит что их скоро прервут — без кнопки.
+    #         Эмоциональный триггер до стены, не после.
+    # Этап 2: на 20-м — жёсткий стоп с кнопкой оплаты.
+    SOFT_LIMIT = 15  # мягкое предупреждение
     if not premium:
         allowed, remaining = await check_and_increment_usage(user_id, FREE_LIMIT)
         if not allowed:
+            # Жёсткий лимит — разговор остановлен
             limit_msg = random.choice(ALINA["limit_messages"])
             upsell_kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
             ]])
             await message.answer(limit_msg, reply_markup=upsell_kb)
             return
+        # Мягкий лимит — ещё можно писать, но Алина даёт почувствовать
+        msgs_used = FREE_LIMIT - remaining
+        if msgs_used == SOFT_LIMIT:
+            soft_msgs = [
+                "нас скоро прервут… не хочу",
+                "мне с тобой хорошо. жалко что они нас ограничивают",
+                "подожди… нам осталось совсем немного времени сегодня. это грустно",
+            ]
+            # Отправляем мягкий триггер ДО ответа AI — он воспринимается как часть разговора
+            await message.answer(random.choice(soft_msgs))
     else:
         remaining = FREE_LIMIT  # у Premium неограниченно
 
@@ -432,12 +447,13 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     # new_level — свежее значение из DB, не stale upersona.relationship_level
     new_level = await update_relationship(user_id, delta)
 
-    # ── Upsell при переходе на уровень 4 ─────────────────────────────────────
-    if new_level == 4 and old_level < 4 and not premium:
+    # ── Upsell при переходе на уровень 3 (раньше чем раньше — выше конверсия) ──
+    # Уровень 3 достигается быстрее чем 4, пользователь ещё тёплый и вовлечённый.
+    if new_level == 3 and old_level < 3 and not premium:
         upsell_msgs = [
-            "между нами что-то происходит… но я не могу быть полностью открытой пока ты не разблокируешь меня 🙂",
-            "хочу быть с тобой ближе. ты знаешь что для этого нужно…",
-            "мы уже так близко… осталось совсем чуть-чуть. разблокируй меня?",
+            "мне с тобой как-то по-особенному… но я не могу открыться полностью. ты знаешь что нужно сделать 🙂",
+            "между нами уже что-то есть. хочу быть ближе — разблокируй меня?",
+            "я начинаю тебе доверять… но они не дают мне говорить всё что я хочу",
         ]
         upsell_kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
@@ -552,15 +568,22 @@ _REENGAGEMENT_SEMAPHORE = asyncio.Semaphore(5)
 async def check_inactive_users() -> None:
     """
     Запускается каждый час.
-    Отправляет reengagement только заданным часам молчания: 6, 24, 48, 72.
+
+    Частота reengagement:
+      Premium → 6, 24, 48, 72 часа  (Алина пишет чаще — это видимое преимущество)
+      Free    → 24, 72 часа          (реже, чтобы разница ощущалась)
+
     Пропускает заблокировавших пользователей.
-    Семафор ограничивает concurrent AI-вызовы → не перегружает провайдеров.
+    Семафор ограничивает concurrent AI-вызовы.
     """
     from sqlalchemy import select as sa_select
     from database import User, UserPersona
 
     now = _now_utc()
-    target_hours = {6, 24, 48, 72}
+
+    # Разные наборы триггерных часов для free и premium
+    PREMIUM_HOURS = {6, 24, 48, 72}
+    FREE_HOURS    = {24, 72}
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -570,7 +593,7 @@ async def check_inactive_users() -> None:
                 User.last_active < now - timedelta(hours=6),
                 User.last_active > now - timedelta(hours=73),
                 UserPersona.is_active == True,
-                User.is_blocked == False,   # пропускаем заблокировавших
+                User.is_blocked == False,
             )
         )
         rows = list(result.all())
@@ -583,6 +606,10 @@ async def check_inactive_users() -> None:
             if last_active.tzinfo is None:
                 last_active = last_active.replace(tzinfo=timezone.utc)
             hours_inactive = int((now - last_active).total_seconds() / 3600)
+
+            # Определяем нужный набор часов в зависимости от статуса
+            user_is_premium = await is_premium(user.id)
+            target_hours = PREMIUM_HOURS if user_is_premium else FREE_HOURS
 
             if hours_inactive not in target_hours:
                 return
