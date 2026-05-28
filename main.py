@@ -387,7 +387,7 @@ async def handle_message(message: Message) -> None:
     if not user_text or user_text.startswith("/"):
         return
 
-    if len(user_text) > 2000:
+    if len(user_text) > 4000:
         await message.answer("сообщение слишком длинное… напиши покороче?")
         return
 

@@ -497,7 +497,7 @@ def build_system_prompt(
     return system
 
 
-def _history_to_messages(history: list, max_content_per_msg: int = 1000) -> list[dict]:
+def _history_to_messages(history: list, max_content_per_msg: int = 2000) -> list[dict]:
     """
     Конвертирует историю ORM-объектов в список dict для API.
     Усекает каждое сообщение до max_content_per_msg символов —
@@ -549,7 +549,7 @@ async def get_ai_response(
 
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     messages.extend(_history_to_messages(history))
-    messages.append({"role": "user", "content": user_message[:2000]})
+    messages.append({"role": "user", "content": user_message[:4000]})
 
     result = await _route_and_call(messages, temperature=arc_temperature)
     if result:
