@@ -599,7 +599,7 @@ async def activate_subscription(
             user_id=user_id,
             plan=plan,
             status="active",
-            expires_at=_now_utc() + __import__("datetime").timedelta(days=days),
+            expires_at=_now_utc() + timedelta(days=days),
             telegram_charge_id=telegram_charge_id,
         )
         session.add(sub)

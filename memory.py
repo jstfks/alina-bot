@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Optional
 
@@ -43,8 +44,8 @@ ALLOWED_MEMORY_KEYS = frozenset({
 
 _VALID_MOODS = frozenset({"warm", "neutral", "cold", "conflict", "flirty"})
 
-GROQ_API_KEY       = __import__("os").getenv("GROQ_API_KEY", "")
-OPENROUTER_API_KEY = __import__("os").getenv("OPENROUTER_API_KEY", "")
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 OPENROUTER_FALLBACK_MODELS = [
     "deepseek/deepseek-v3-0324:free",

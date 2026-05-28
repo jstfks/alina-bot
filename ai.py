@@ -320,6 +320,42 @@ async def _route_and_call(
     return await _call_openrouter(messages, max_tokens, temperature)
 
 
+# ── Дуга сессии ───────────────────────────────────────────────────────────────
+
+def build_session_arc(session_message_count: int) -> tuple[float, str]:
+    """
+    Возвращает (temperature, arc_text) в зависимости от глубины сессии.
+
+    Алина постепенно теплеет по ходу разговора — как живой человек.
+    Температура растёт → ответы свободнее, менее «отфильтрованные».
+
+    Пороги из девлога:
+      1–3   → 0.88  не форсировать тепло
+      4–10  → 0.92  чуть теплее, можно делиться своим
+      11–20 → 0.96  расслаблена, личное «как вырвалось»
+      20+   → 1.0   очень открытая, нежная, без фильтра
+    """
+    if session_message_count <= 3:
+        return 0.88, (
+            "━━━ ДУГА РАЗГОВОРА ━━━\n"
+            "Начало разговора. Не форсируй тепло — обычный темп, присматривайся."
+        )
+    if session_message_count <= 10:
+        return 0.92, (
+            "━━━ ДУГА РАЗГОВОРА ━━━\n"
+            "Разговор набирает обороты. Чуть теплее обычного — можно поделиться чем-то своим."
+        )
+    if session_message_count <= 20:
+        return 0.96, (
+            "━━━ ДУГА РАЗГОВОРА ━━━\n"
+            "Вы уже хорошо разговорились. Расслаблена — может вырваться что-то личное, как само собой."
+        )
+    return 1.0, (
+        "━━━ ДУГА РАЗГОВОРА ━━━\n"
+        "Долгий разговор. Очень открытая, нежная, почти без фильтра."
+    )
+
+
 # ── Санитизация строк для промпта ─────────────────────────────────────────────
 
 def _sanitise_prompt_string(value: str, max_len: int = 200) -> str:
@@ -358,6 +394,7 @@ def build_system_prompt(
     memories: list,
     session_message_count: int = 0,
     emotional_state=None,
+    arc_block: str = "",
 ) -> str:
     # Ленивый импорт: к моменту вызова оба модуля уже полностью загружены.
     # На уровне модуля импортировать нельзя — circular import (ai <-> memory).
@@ -432,6 +469,8 @@ def build_system_prompt(
 
 {memory_block}
 
+{arc_block}
+
 ━━━ КАК ЗВУЧИТ ЖИВОЙ ОТВЕТ ━━━
 Плохо (картонно): «Понятно, это звучит сложно. Как ты себя чувствуешь?»
 Хорошо: «блин… и что теперь?»
@@ -497,19 +536,22 @@ async def get_ai_response(
     """
     effective_level = relationship_level if is_premium else min(relationship_level, 3)
 
+    arc_temperature, arc_block = build_session_arc(message_count_today)
+
     system_prompt = build_system_prompt(
         user_name=user_name,
         relationship_level=effective_level,
         memories=memories,
         session_message_count=message_count_today,
         emotional_state=emotional_state,
+        arc_block=arc_block,
     )
 
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     messages.extend(_history_to_messages(history))
     messages.append({"role": "user", "content": user_message[:2000]})
 
-    result = await _route_and_call(messages)
+    result = await _route_and_call(messages, temperature=arc_temperature)
     if result:
         return result, False
 

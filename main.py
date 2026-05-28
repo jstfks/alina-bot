@@ -513,6 +513,8 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     # Счётчик: реальное число сообщений ДО этого обмена + 2 (user+assistant).
     total_count = history_count + 2  # +user +assistant только что сохранённые
 
+    convo_dicts = None  # инициализируем явно — избегаем dir() хака
+
     if total_count % 6 == 0 and not is_fallback:
         # Перечитываем историю чтобы включить текущий обмен
         fresh_history = await get_history(user_id, limit=16)
@@ -520,7 +522,7 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
         _create_background_task(extract_memories(user_id, convo_dicts))
 
     if total_count % 8 == 0 and not is_fallback:
-        if "convo_dicts" not in dir():  # Избегаем повторного чтения если уже прочитали
+        if convo_dicts is None:  # избегаем повторного чтения если уже прочитали
             fresh_history = await get_history(user_id, limit=16)
             convo_dicts = [{"role": m.role, "content": m.content} for m in fresh_history]
         _create_background_task(extract_emotional_state(user_id, convo_dicts))
