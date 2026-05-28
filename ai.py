@@ -87,7 +87,12 @@ async def _call_deepseek(
                 return None
             data = await resp.json()
             if "choices" not in data:
-                log.warning("[DeepSeek] неожиданный ответ: %s", data.get("error"))
+                err = data.get("error", {})
+                # Insufficient Balance — баланс кончился, нужно пополнить
+                if "Insufficient Balance" in str(err):
+                    log.error("[DeepSeek] БАЛАНС КОНЧИЛСЯ — пополните счёт на platform.deepseek.com")
+                else:
+                    log.warning("[DeepSeek] неожиданный ответ: %s", err)
                 return None
             text = data["choices"][0]["message"]["content"].strip()
             return text or None
@@ -265,7 +270,7 @@ async def _call_openrouter(
 
 async def _route_and_call(
     messages: list[dict],
-    max_tokens: int = 250,
+    max_tokens: int = 700,
     temperature: float = 0.92,
 ) -> Optional[str]:
     result = await _call_deepseek(messages, max_tokens, temperature)
@@ -510,5 +515,5 @@ async def generate_reengagement_message(
     )
 
     messages = [{"role": "user", "content": prompt}]
-    result = await _route_and_call(messages, max_tokens=80, temperature=0.9)
+    result = await _route_and_call(messages, max_tokens=120, temperature=0.9)
     return result or random.choice(examples)
