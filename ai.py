@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 
 # ── API ключи ─────────────────────────────────────────────────────────────────
 
+VENICE_ADMIN_KEY   = os.getenv("VENICE_ADMIN_KEY", "")
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY", "")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
@@ -38,11 +39,13 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 # ── Модели ────────────────────────────────────────────────────────────────────
 
+VENICE_MODEL   = "venice-uncensored"
 DEEPSEEK_MODEL = "deepseek-chat"
 GEMINI_MODEL   = "gemini-2.5-flash"
 GROQ_MODEL     = "moonshotai/kimi-k2-instruct"
 
 OPENROUTER_FALLBACK_MODELS = [
+    "venice-uncensored",                       # 🧪 ТЕСТ NSFW — приоритет
     "openrouter/owl-alpha",                    # 🧪 ТЕСТ — приоритет
     "deepseek/deepseek-v3-0324:free",          # лучший бесплатный для ролеплея на русском
     "meta-llama/llama-4-maverick:free",        # резерв №1
