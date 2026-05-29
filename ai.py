@@ -63,14 +63,17 @@ NSFW_OPENROUTER_MODELS = [
 
 # ── Vision-модели ────────────────────────────────────────────────────────────
 
-VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+VISION_MODEL = "google/gemma-4-31b-it:free"
+
+VISION_CLASSIFIER_MODELS = [
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+]
 
 VISION_FALLBACK_MODELS = [
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "moonshotai/kimi-k2.6:free",
-    "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
 ]
 
 
@@ -94,6 +97,18 @@ NSFW_KEYWORDS = {
 def is_nsfw_text(text: str) -> bool:
     if not text:
         return False
+
+def contains_chinese(text: str) -> bool:
+    return any('\u4e00' <= ch <= '\u9fff' for ch in text)
+
+
+IMAGE_NSFW_LABELS = {
+    "NSFW",
+    "FLIRTY",
+    "LINGERIE",
+    "EXPLICIT",
+}
+
 
     lowered = text.lower()
     score = 0
@@ -346,6 +361,91 @@ async def _call_openrouter(
     return None
 
 
+
+
+async def _classify_image_nsfw(
+    image_url: str,
+) -> tuple[bool, str]:
+    """
+    Классификация изображения:
+    SAFE / FLIRTY / LINGERIE / EXPLICIT
+    """
+
+    if not OPENROUTER_API_KEY:
+        return False, "SAFE"
+
+    session = await get_http_session()
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    system_prompt = (
+        "Analyze the image carefully. "
+        "Return ONLY one label: "
+        "SAFE, FLIRTY, LINGERIE or EXPLICIT. "
+        "Do not explain."
+    )
+
+    for model in VISION_CLASSIFIER_MODELS:
+        try:
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_url
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 10,
+                "temperature": 0,
+            }
+
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=18),
+            ) as resp:
+
+                if _is_rate_limited(resp.status):
+                    await asyncio.sleep(0.2)
+                    continue
+
+                data = await resp.json()
+
+                if "choices" not in data:
+                    continue
+
+                result = (
+                    data["choices"][0]["message"]["content"]
+                    .strip()
+                    .upper()
+                )
+
+                for label in IMAGE_NSFW_LABELS:
+                    if label in result:
+                        return label != "SAFE", label
+
+        except Exception as exc:
+            log.warning("[VisionClassifier] %s", exc)
+
+        await asyncio.sleep(0.2)
+
+    return False, "SAFE"
+
 async def _call_openrouter_nsfw(
     messages: list[dict],
     max_tokens: int,
@@ -519,7 +619,7 @@ async def get_ai_response_image(
         "Пользователь прислал тебе фотографию. Отреагируй в своём стиле — "
         "коротко, живо, как живой человек в переписке. "
         "Не описывай фото подробно — просто отреагируй на него естественно. "
-        "Если на фото что-то интересное — можешь задать один вопрос."
+        "Если на фото что-то интересное — можешь задать один вопрос. ВСЕГДА отвечай ТОЛЬКО на русском языке. Никогда не используй китайский, английский или другие языки."
     )
 
     user_text = caption or ""
@@ -717,6 +817,25 @@ def _sanitise_prompt_string(value: str, max_len: int = 200) -> str:
     cleaned = cleaned.replace("\n", " ").replace("\r", " ")
     # Нейтрализуем паттерны инъекции директив
     for marker in ("SYSTEM:", "Инструкция:", "system:", "━━━", "───", "---"):
+
+    # ── Image NSFW classification ─────────────────────────────────────
+
+    image_is_nsfw = False
+    image_label = "SAFE"
+
+    try:
+        image_is_nsfw, image_label = await _classify_image_nsfw(image_url)
+
+        log.info(
+            "[ImageClassifier] nsfw=%s label=%s",
+            image_is_nsfw,
+            image_label,
+        )
+
+    except Exception as exc:
+        log.warning("[ImageClassifier] failed: %s", exc)
+
+
         cleaned = cleaned.replace(marker, "")
     return cleaned.strip()[:max_len]
 
@@ -939,7 +1058,9 @@ async def get_ai_response(
     messages.extend(_history_to_messages(tiered_history))
     messages.append({"role": "user", "content": user_message[:4000]})
 
-    result = await _route_and_call(messages, temperature=arc_temperature)
+    result = await _route_and_call(messages, temperature=arc_temperature,
+        force_nsfw=image_is_nsfw
+    )
     if result:
         result = _split_paragraphs(result)
         return result, False
