@@ -45,8 +45,6 @@ GEMINI_MODEL   = "gemini-2.5-flash"
 GROQ_MODEL     = "moonshotai/kimi-k2-instruct"
 
 OPENROUTER_FALLBACK_MODELS = [
-    "venice-uncensored",                       # 🧪 ТЕСТ NSFW — приоритет
-    "openrouter/owl-alpha",                    # 🧪 ТЕСТ — приоритет
     "deepseek/deepseek-v3-0324:free",          # лучший бесплатный для ролеплея на русском
     "meta-llama/llama-4-maverick:free",        # резерв №1
     "meta-llama/llama-3.3-70b-instruct:free",  # резерв №2
@@ -74,18 +72,18 @@ async def _call_deepseek(
     max_tokens: int,
     temperature: float,
 ) -> Optional[str]:
-    if not DEEPSEEK_API_KEY:
+    if not VENICE_ADMIN_KEY:
         return None
     session = await get_http_session()
     try:
         async with session.post(
-            "https://api.deepseek.com/v1/chat/completions",
+            "https://api.venice.ai/api/v1",
             headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Authorization": f"Bearer {VENICE_ADMIN_KEY}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": DEEPSEEK_MODEL,
+                "model": VENICE_MODEL,
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
@@ -93,24 +91,24 @@ async def _call_deepseek(
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             if _is_rate_limited(resp.status):
-                log.warning("[DeepSeek] rate-limited (%s)", resp.status)
+                log.warning("[venice] rate-limited (%s)", resp.status)
                 return None
             data = await resp.json()
             if "choices" not in data:
                 err = data.get("error", {})
                 # Insufficient Balance — баланс кончился, нужно пополнить
                 if "Insufficient Balance" in str(err):
-                    log.error("[DeepSeek] БАЛАНС КОНЧИЛСЯ — пополните счёт на platform.deepseek.com")
+                    log.error("[venice] БАЛАНС КОНЧИЛСЯ — пополните счёт на platform.deepseek.com")
                 else:
-                    log.warning("[DeepSeek] неожиданный ответ: %s", err)
+                    log.warning("[venice] неожиданный ответ: %s", err)
                 return None
             text = data["choices"][0]["message"]["content"].strip()
             return text or None
     except asyncio.TimeoutError:
-        log.warning("[DeepSeek] timeout")
+        log.warning("[venice] timeout")
         return None
     except Exception as exc:
-        log.warning("[DeepSeek] исключение: %s", exc)
+        log.warning("[venice] исключение: %s", exc)
         return None
 
 
