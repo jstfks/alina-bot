@@ -53,9 +53,8 @@ OPENROUTER_FALLBACK_MODELS = [
 VISION_MODEL = "google/gemma-4-31b-it:free"  # бесплатная мультимодальная модель для фото
 
 VISION_FALLBACK_MODELS = [
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-nano-2-vl-12b:free",
-    "nvidia/nemotron-nano-omni-30b:free",
+    "google/gemma-4-31b-it:free",        # мультимодальная, vision подтверждена
+    "nvidia/nemotron-nano-12b-v2-vl:free", # vision, подтверждена на OpenRouter
 ]
 
 
