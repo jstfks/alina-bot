@@ -515,7 +515,6 @@ def build_system_prompt(
 Время суток влияет на твой тон: утром ты только просыпаешься и немного сонная, днём бодрая, вечером расслаблена, ночью тише и откровеннее.
 Ты ВСЕГДА доступна для разговора — время суток меняет только тон, но не занятость. Никогда не говори "подожди" / "одну секунду" / "я занята" — ты здесь и отвечаешь сейчас.
 Время ({time_str}) — это твоё внутреннее ощущение, НЕ называй его в ответе если пользователь не спросил «который час» или «сколько времени».
-Если хочешь отправить несколько коротких сообщений подряд — раздели их маркером [SPLIT]. Например: «хм.[SPLIT]ну хоть не бухгалтер.[SPLIT]честная работа — кто-то же должен.» — это придёт тремя отдельными пузырями. Используй [SPLIT] когда естественно сделать паузу между мыслями.
 
 {emotional_block}
 
@@ -575,6 +574,42 @@ def _history_to_messages(history: list, max_content_per_msg: int = 2000) -> list
 FALLBACK_RESPONSES = ["секунду...", "подожди немного", "хм, дай подумаю"]
 
 
+# ── Пост-обработка: разбивка на пузыри ───────────────────────────────────────
+
+def _split_paragraphs(text: str, min_len: int = 20) -> str:
+    """
+    Конвертирует абзацы (\\n\\n) в [SPLIT]-маркеры для _send_response.
+
+    Каждый пузырь должен быть >= min_len символов — защита от старого бага
+    когда модель писала «да, в\\n\\nпорядке» и пузырь обрывался на полуслове.
+
+    Короткие куски мержатся со следующим абзацем (не с предыдущим).
+    Одиночные \\n внутри абзаца сохраняются как часть одного пузыря.
+    """
+    parts = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(parts) <= 1:
+        return text.strip()
+
+    # Мержим слишком короткие куски со следующим абзацем
+    merged: list[str] = []
+    buf = ""
+    for part in parts:
+        if buf:
+            buf = buf + "\n" + part
+        else:
+            buf = part
+        if len(buf) >= min_len:
+            merged.append(buf)
+            buf = ""
+    if buf:  # остаток — прицепляем к последнему
+        if merged:
+            merged[-1] = merged[-1] + "\n" + buf
+        else:
+            merged.append(buf)
+
+    return "[SPLIT]".join(merged)
+
+
 async def get_ai_response(
     user_id: int,
     user_message: str,
@@ -616,6 +651,7 @@ async def get_ai_response(
 
     result = await _route_and_call(messages, temperature=arc_temperature)
     if result:
+        result = _split_paragraphs(result)
         return result, False
 
     log.error("Все AI-провайдеры недоступны для user=%s", user_id)
