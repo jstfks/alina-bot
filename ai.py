@@ -52,6 +52,12 @@ OPENROUTER_FALLBACK_MODELS = [
 
 VISION_MODEL = "google/gemma-4-31b-it:free"  # бесплатная мультимодальная модель для фото
 
+VISION_FALLBACK_MODELS = [
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-nano-2-vl-12b:free",
+    "nvidia/nemotron-nano-omni-30b:free",
+]
+
 
 # ── Определение rate-limiting ─────────────────────────────────────────────────
 
@@ -305,54 +311,58 @@ async def _call_vision_openrouter(
     max_tokens: int = 700,
     temperature: float = 0.92,
 ) -> Optional[str]:
-    """Отправляет изображение + текст в Gemma 4 31B через OpenRouter."""
+    """Перебирает VISION_FALLBACK_MODELS пока один не ответит."""
     if not OPENROUTER_API_KEY:
         return None
     session = await get_http_session()
     content: list[dict] = [
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
-        },
+        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
     ]
     if user_text:
         content.append({"type": "text", "text": user_text})
 
-    try:
-        async with session.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/alina-bot",
-                "X-Title": "Alina Bot",
-            },
-            json={
-                "model": VISION_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": content},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
-            timeout=aiohttp.ClientTimeout(total=40),
-        ) as resp:
-            if resp.status == 429:
-                log.warning("[Vision] rate-limited")
-                return None
-            data = await resp.json()
-            if "choices" not in data:
-                log.warning("[Vision] ошибка: %s", data.get("error"))
-                return None
-            text = data["choices"][0]["message"]["content"].strip()
-            return _strip_think_tags(text) or None
-    except asyncio.TimeoutError:
-        log.warning("[Vision] timeout")
-        return None
-    except Exception as exc:
-        log.warning("[Vision] исключение: %s", exc)
-        return None
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/alina-bot",
+        "X-Title": "Alina Bot",
+    }
+    for model in VISION_FALLBACK_MODELS:
+        try:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": content},
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=aiohttp.ClientTimeout(total=40),
+            ) as resp:
+                if resp.status == 429:
+                    log.warning("[Vision] %s rate-limited, пробуем следующую", model)
+                    await asyncio.sleep(0.3)
+                    continue
+                data = await resp.json()
+                if "choices" not in data:
+                    log.warning("[Vision] %s ошибка: %s", model, data.get("error"))
+                    await asyncio.sleep(0.3)
+                    continue
+                text = _strip_think_tags(data["choices"][0]["message"]["content"].strip())
+                if text:
+                    log.info("[Vision] успех: %s", model)
+                    return text
+        except asyncio.TimeoutError:
+            log.warning("[Vision] %s timeout", model)
+        except Exception as exc:
+            log.warning("[Vision] %s исключение: %s", model, exc)
+        await asyncio.sleep(0.3)
+
+    return None
 
 
 async def get_ai_response_image(
@@ -401,7 +411,20 @@ async def get_ai_response_image(
     if result:
         return _split_paragraphs(result), False
 
-    log.error("[Vision] недоступна для user=%s", user_id)
+    # Fallback: Gemini поддерживает vision нативно
+    log.warning("[Vision] все OpenRouter vision-модели недоступны → Gemini")
+    gemini_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
+            *([ {"type": "text", "text": user_text} ] if user_text else []),
+        ]},
+    ]
+    result = await _call_gemini(gemini_messages, max_tokens=700, temperature=0.92)
+    if result:
+        return _split_paragraphs(result), False
+
+    log.error("[Vision] все провайдеры недоступны для user=%s", user_id)
     return random.choice(FALLBACK_RESPONSES), True
 
 
