@@ -49,6 +49,7 @@ from dotenv import load_dotenv
 from ai import (
     FALLBACK_RESPONSES,
     get_ai_response,
+    get_ai_response_image,
     generate_reengagement_message,
 )
 from http_client import close_http_session
@@ -556,6 +557,88 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
             fresh_history = await get_history(user_id, limit=16)
             convo_dicts = [{"role": m.role, "content": m.content} for m in fresh_history]
         _create_background_task(extract_emotional_state(user_id, convo_dicts))
+
+
+# ── Обработчик фотографий ─────────────────────────────────────────────────────
+
+@dp.message(F.photo)
+async def handle_photo(message: Message) -> None:
+    user_id = message.from_user.id
+    lock    = _user_locks[user_id]
+    async with lock:
+        await _process_photo(message)
+
+
+async def _process_photo(message: Message) -> None:
+    user_id = message.from_user.id
+
+    # ── Лимиты (те же что у текстовых сообщений) ─────────────────────────────
+    premium   = await is_premium(user_id)
+    remaining, _ = await check_daily_limit(user_id, is_premium=premium)
+    if remaining <= 0:
+        limit_msg = random.choice(ALINA.get("limit_messages", ["на сегодня всё…"]))
+        await message.answer(limit_msg)
+        return
+
+    # ── Typing loop ───────────────────────────────────────────────────────────
+    stop_typing = asyncio.Event()
+    _create_background_task(_typing_loop(message.chat.id, stop_typing))
+
+    try:
+        # ── Скачиваем фото (берём наибольший размер) ──────────────────────────
+        photo   = message.photo[-1]
+        file    = await bot.get_file(photo.file_id)
+        content = await bot.download_file(file.file_path)
+        import base64
+        image_b64 = base64.b64encode(content.read()).decode("utf-8")
+        mime_type = "image/jpeg"
+
+        # ── Контекст пользователя ─────────────────────────────────────────────
+        upersona  = await get_or_create_persona(user_id)
+        memories  = await get_memories(user_id)
+        user_name = next((m.value for m in memories if m.key == "name"), None)
+        if not user_name:
+            user   = await get_or_create_user(user_id)
+            user_name = user.user_name_given or message.from_user.first_name or ""
+
+        emotional_state = await get_emotional_state(user_id)
+        caption = message.caption or ""
+
+        # ── Сохраняем факт отправки фото в историю ────────────────────────────
+        await save_message(user_id, "user", f"[фото]{': ' + caption if caption else ''}")
+
+        # ── AI-ответ ──────────────────────────────────────────────────────────
+        try:
+            response, is_fallback = await asyncio.wait_for(
+                get_ai_response_image(
+                    user_id=user_id,
+                    image_b64=image_b64,
+                    mime_type=mime_type,
+                    caption=caption,
+                    user_name=user_name,
+                    relationship_level=upersona.relationship_level,
+                    memories=memories,
+                    is_premium=premium,
+                    emotional_state=emotional_state,
+                ),
+                timeout=75,
+            )
+        except asyncio.TimeoutError:
+            stop_typing.set()
+            log.error("[process_photo] таймаут 75с для user=%s", user_id)
+            await message.answer("что-то не могу открыть… попробуй ещё раз?")
+            return
+        finally:
+            stop_typing.set()
+
+        if not is_fallback:
+            await save_message(user_id, "assistant", response.replace("[SPLIT]", " "))
+        await _send_response(message, response)
+
+    except Exception as exc:
+        stop_typing.set()
+        log.error("[process_photo] исключение для user=%s: %s", user_id, exc)
+        await message.answer("что-то не так с фото… попробуй текстом?")
 
 
 # ── Отправка ответа ───────────────────────────────────────────────────────────

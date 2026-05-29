@@ -50,6 +50,8 @@ OPENROUTER_FALLBACK_MODELS = [
     "qwen/qwen3-235b-a22b:free",               # последний — генерирует <think> блоки
 ]
 
+VISION_MODEL = "google/gemma-4-31b-it:free"  # бесплатная мультимодальная модель для фото
+
 
 # ── Определение rate-limiting ─────────────────────────────────────────────────
 
@@ -293,6 +295,114 @@ async def _call_openrouter(
 
     log.error("[OpenRouter] все модели недоступны")
     return None
+
+
+async def _call_vision_openrouter(
+    system_prompt: str,
+    user_text: str,
+    image_b64: str,
+    mime_type: str = "image/jpeg",
+    max_tokens: int = 700,
+    temperature: float = 0.92,
+) -> Optional[str]:
+    """Отправляет изображение + текст в Gemma 4 31B через OpenRouter."""
+    if not OPENROUTER_API_KEY:
+        return None
+    session = await get_http_session()
+    content: list[dict] = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+        },
+    ]
+    if user_text:
+        content.append({"type": "text", "text": user_text})
+
+    try:
+        async with session.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/alina-bot",
+                "X-Title": "Alina Bot",
+            },
+            json={
+                "model": VISION_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": content},
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            timeout=aiohttp.ClientTimeout(total=40),
+        ) as resp:
+            if resp.status == 429:
+                log.warning("[Vision] rate-limited")
+                return None
+            data = await resp.json()
+            if "choices" not in data:
+                log.warning("[Vision] ошибка: %s", data.get("error"))
+                return None
+            text = data["choices"][0]["message"]["content"].strip()
+            return _strip_think_tags(text) or None
+    except asyncio.TimeoutError:
+        log.warning("[Vision] timeout")
+        return None
+    except Exception as exc:
+        log.warning("[Vision] исключение: %s", exc)
+        return None
+
+
+async def get_ai_response_image(
+    user_id: int,
+    image_b64: str,
+    mime_type: str,
+    caption: str,
+    user_name: str,
+    relationship_level: int,
+    memories: list,
+    is_premium: bool = False,
+    emotional_state=None,
+) -> tuple[str, bool]:
+    """
+    Возвращает (response_text, is_fallback) для входящего фото.
+    Использует Gemma 4 31B (vision) через OpenRouter.
+    """
+    from persona import ALINA
+    persona = ALINA
+
+    effective_level = relationship_level if is_premium else min(relationship_level, 3)
+    rel_desc = persona["relationship_levels"].get(effective_level, "")
+    safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
+    name_str  = f"Его зовут {safe_name}." if safe_name else ""
+
+    system_prompt = (
+        f"{persona['core_identity']}\n\n"
+        f"{persona['personality']}\n\n"
+        f"{rel_desc}\n\n"
+        f"{persona['dialogue_rules']}\n\n"
+        f"{name_str}\n"
+        "Пользователь прислал тебе фотографию. Отреагируй в своём стиле — "
+        "коротко, живо, как живой человек в переписке. "
+        "Не описывай фото подробно — просто отреагируй на него естественно. "
+        "Если на фото что-то интересное — можешь задать один вопрос."
+    )
+
+    user_text = caption or ""
+    result = await _call_vision_openrouter(
+        system_prompt=system_prompt,
+        user_text=user_text,
+        image_b64=image_b64,
+        mime_type=mime_type,
+        temperature=0.92,
+    )
+    if result:
+        return _split_paragraphs(result), False
+
+    log.error("[Vision] недоступна для user=%s", user_id)
+    return random.choice(FALLBACK_RESPONSES), True
 
 
 # ── Цепочка провайдеров ───────────────────────────────────────────────────────
