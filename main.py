@@ -377,6 +377,23 @@ async def successful_payment(message: Message) -> None:
     )
 
 
+# ── Typing loop: держит индикатор живым пока генерируется ответ ───────────────
+
+async def _typing_loop(chat_id: int, stop_event: asyncio.Event) -> None:
+    """Шлёт 'typing' каждые 4 секунды пока stop_event не выставлен.
+    Telegram гасит индикатор через ~5с — без повтора пользователь видит
+    мёртвого бота при долгой генерации."""
+    while not stop_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=4)
+        except asyncio.TimeoutError:
+            pass
+
+
 # ── Основной обработчик сообщений ─────────────────────────────────────────────
 
 @dp.message(F.text)
@@ -460,8 +477,20 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
         ]])
         await message.answer(random.choice(upsell_msgs), reply_markup=upsell_kb)
 
-    # ── Typing indicator ──────────────────────────────────────────────────────
-    await bot.send_chat_action(message.chat.id, "typing")
+    # ── Время с последнего сообщения (нужно до get_ai_response для тиеров сессии) ─
+    hours_since_last: float = 0.0
+    if upersona.last_interaction:
+        last_ts = upersona.last_interaction
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        hours_since_last = (_now_utc() - last_ts).total_seconds() / 3600
+        _create_background_task(
+            update_hours_since_message(user_id, round(hours_since_last, 1))
+        )
+
+    # ── Typing indicator loop (держит индикатор живым всё время генерации) ──────
+    stop_typing = asyncio.Event()
+    _create_background_task(_typing_loop(message.chat.id, stop_typing))
 
     # ── Имя пользователя ──────────────────────────────────────────────────────
     memories  = await get_memories(user_id)
@@ -475,31 +504,32 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     # ── Эмоциональное состояние ───────────────────────────────────────────────
     emotional_state = await get_emotional_state(user_id)
 
-    # ── Обновляем время молчания ──────────────────────────────────────────────
-    if upersona.last_interaction:
-        last_ts = upersona.last_interaction
-        if last_ts.tzinfo is None:
-            last_ts = last_ts.replace(tzinfo=timezone.utc)
-        hours_elapsed = (_now_utc() - last_ts).total_seconds() / 3600
-        _create_background_task(
-            update_hours_since_message(user_id, round(hours_elapsed, 1))
-        )
-
     # ── Генерируем AI-ответ ───────────────────────────────────────────────────
+    # Глобальный таймаут 75с — хуже чем молчать 3+ минуты.
     # Передаём history_before — это история БЕЗ текущего сообщения.
-    # get_ai_response добавит user_text сам в конец messages[].
-    # new_level — актуальный уровень после update_relationship.
-    response, is_fallback = await get_ai_response(
-        user_id             = user_id,
-        user_message        = user_text,
-        history             = history_before,
-        user_name           = user_name,
-        relationship_level  = new_level,       # ← актуальный уровень, не stale
-        memories            = memories,
-        message_count_today = FREE_LIMIT - remaining,
-        is_premium          = premium,
-        emotional_state     = emotional_state,
-    )
+    try:
+        response, is_fallback = await asyncio.wait_for(
+            get_ai_response(
+                user_id             = user_id,
+                user_message        = user_text,
+                history             = history_before,
+                user_name           = user_name,
+                relationship_level  = new_level,
+                memories            = memories,
+                message_count_today = FREE_LIMIT - remaining,
+                is_premium          = premium,
+                emotional_state     = emotional_state,
+                hours_since_last    = hours_since_last,
+            ),
+            timeout=75,
+        )
+    except asyncio.TimeoutError:
+        stop_typing.set()
+        log.error("[process_message] глобальный таймаут 75с для user=%s", user_id)
+        await message.answer("затупила что-то… попробуй ещё раз?")
+        return
+    finally:
+        stop_typing.set()
 
     # ── Сохраняем ответ (с флагом fallback если AI провалился) ───────────────
     await save_message(user_id, "assistant", response, is_fallback=is_fallback)

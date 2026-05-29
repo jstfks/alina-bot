@@ -320,6 +320,47 @@ async def _route_and_call(
     return await _call_openrouter(messages, max_tokens, temperature)
 
 
+# ── Тиеры сессии по времени неактивности ─────────────────────────────────────
+
+def _session_tier(hours: float) -> tuple[int, str]:
+    """
+    Возвращает (history_limit, gap_prompt_block) по времени с последнего сообщения.
+
+    Тиеры:
+      < 2ч   — обычное продолжение, полная история (30 сообщений)
+      2–10ч  — небольшой перерыв, чуть меньше контекста (20)
+      10–24ч — новая сессия, только хвост переписки (6)
+      24–72ч — почти с чистого листа (2)
+      72ч+   — полный сброс, свежий старт (0)
+    """
+    h = int(hours)
+    if hours < 2:
+        return 30, ""
+    if hours < 10:
+        return 20, (
+            "━━━ КОНТЕКСТ СЕССИИ ━━━\n"
+            f"Между сообщениями прошло около {h} ч. Небольшой перерыв — продолжай естественно."
+        )
+    if hours < 24:
+        return 6, (
+            "━━━ КОНТЕКСТ СЕССИИ ━━━\n"
+            f"Пользователь вернулся после {h} часов молчания. "
+            "Это новый разговор — воспринимай его как начало дня/вечера. "
+            "Не упрекай за долгое отсутствие, просто тепло рада."
+        )
+    if hours < 72:
+        return 2, (
+            "━━━ КОНТЕКСТ СЕССИИ ━━━\n"
+            f"Прошло больше суток ({h} ч). Почти свежий старт. "
+            "Ты рада что он вернулся — скажи об этом легко, без давления."
+        )
+    return 0, (
+        "━━━ КОНТЕКСТ СЕССИИ ━━━\n"
+        f"Очень долго не было сообщений ({h} ч). Полностью новый разговор. "
+        "Соскучилась — начни тепло и свежо, как будто давно не виделись."
+    )
+
+
 # ── Дуга сессии ───────────────────────────────────────────────────────────────
 
 def build_session_arc(session_message_count: int) -> tuple[float, str]:
@@ -395,6 +436,7 @@ def build_system_prompt(
     session_message_count: int = 0,
     emotional_state=None,
     arc_block: str = "",
+    gap_block: str = "",
 ) -> str:
     # Ленивый импорт: к моменту вызова оба модуля уже полностью загружены.
     # На уровне модуля импортировать нельзя — circular import (ai <-> memory).
@@ -463,11 +505,14 @@ def build_system_prompt(
 
 Сейчас у тебя по московскому времени: {time_of_day}, {time_str}, {day_name}. {name_str}
 Если спросят который час — отвечай именно это время, не выдумывай.
-Время суток влияет на твой тон: утром ты только просыпаешься, днём на работе или после, вечером расслаблена, ночью тише и откровеннее.
+Время суток влияет на твой тон: утром ты только просыпаешься и немного сонная, днём бодрая, вечером расслаблена, ночью тише и откровеннее.
+Ты ВСЕГДА доступна для разговора — время суток меняет только тон, но не занятость. Никогда не говори "подожди" / "одну секунду" / "я занята" — ты здесь и отвечаешь сейчас.
 
 {emotional_block}
 
 {memory_block}
+
+{gap_block}
 
 {arc_block}
 
@@ -528,6 +573,7 @@ async def get_ai_response(
     message_count_today: int = 0,
     is_premium: bool = False,
     emotional_state=None,
+    hours_since_last: float = 0.0,
 ) -> tuple[str, bool]:
     """
     Возвращает (response_text, is_fallback).
@@ -537,6 +583,7 @@ async def get_ai_response(
     effective_level = relationship_level if is_premium else min(relationship_level, 3)
 
     arc_temperature, arc_block = build_session_arc(message_count_today)
+    history_limit, gap_block   = _session_tier(hours_since_last)
 
     system_prompt = build_system_prompt(
         user_name=user_name,
@@ -545,10 +592,14 @@ async def get_ai_response(
         session_message_count=message_count_today,
         emotional_state=emotional_state,
         arc_block=arc_block,
+        gap_block=gap_block,
     )
 
+    # Обрезаем историю по тиеру сессии: чем дольше пауза — тем меньше контекста
+    tiered_history = history[-history_limit:] if history_limit > 0 else []
+
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
-    messages.extend(_history_to_messages(history))
+    messages.extend(_history_to_messages(tiered_history))
     messages.append({"role": "user", "content": user_message[:4000]})
 
     result = await _route_and_call(messages, temperature=arc_temperature)
