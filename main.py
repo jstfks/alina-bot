@@ -573,9 +573,9 @@ async def _process_photo(message: Message) -> None:
     user_id = message.from_user.id
 
     # ── Лимиты (те же что у текстовых сообщений) ─────────────────────────────
-    premium   = await is_premium(user_id)
-    remaining, _ = await check_daily_limit(user_id, is_premium=premium)
-    if remaining <= 0:
+    premium          = await is_premium(user_id)
+    allowed, remaining = await check_and_increment_usage(user_id, FREE_LIMIT)
+    if not allowed:
         limit_msg = random.choice(ALINA.get("limit_messages", ["на сегодня всё…"]))
         await message.answer(limit_msg)
         return
