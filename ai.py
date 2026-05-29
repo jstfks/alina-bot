@@ -43,10 +43,11 @@ GEMINI_MODEL   = "gemini-2.5-flash"
 GROQ_MODEL     = "moonshotai/kimi-k2-instruct"
 
 OPENROUTER_FALLBACK_MODELS = [
-    "deepseek/deepseek-v3-0324:free",        # лучший бесплатный для ролеплея на русском
-    "meta-llama/llama-4-maverick:free",       # резерв №1
-    "meta-llama/llama-3.3-70b-instruct:free", # резерв №2
-    "qwen/qwen3-235b-a22b:free",              # последний — генерирует <think> блоки
+    "openrouter/owl-alpha",                    # 🧪 ТЕСТ — приоритет
+    "deepseek/deepseek-v3-0324:free",          # лучший бесплатный для ролеплея на русском
+    "meta-llama/llama-4-maverick:free",        # резерв №1
+    "meta-llama/llama-3.3-70b-instruct:free",  # резерв №2
+    "qwen/qwen3-235b-a22b:free",               # последний — генерирует <think> блоки
 ]
 
 
@@ -301,6 +302,12 @@ async def _route_and_call(
     max_tokens: int = 700,
     temperature: float = 0.92,
 ) -> Optional[str]:
+    # 🧪 ТЕСТ: Owl Alpha приоритет — OpenRouter идёт первым
+    result = await _call_openrouter(messages, max_tokens, temperature)
+    if result:
+        return result
+    log.info("[route] OpenRouter/Owl Alpha недоступен → DeepSeek")
+
     result = await _call_deepseek(messages, max_tokens, temperature)
     if result:
         return result
@@ -311,13 +318,8 @@ async def _route_and_call(
         return result
     log.info("[route] Gemini недоступен → Groq/Kimi")
 
-    result = await _call_groq(messages, max_tokens, temperature)
-    if result:
-        return result
-    log.info("[route] Groq недоступен → OpenRouter")
-
     await asyncio.sleep(0.5)
-    return await _call_openrouter(messages, max_tokens, temperature)
+    return await _call_groq(messages, max_tokens, temperature)
 
 
 # ── Тиеры сессии по времени неактивности ─────────────────────────────────────
@@ -474,6 +476,9 @@ def build_system_prompt(
     safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
     name_str  = f"Его зовут {safe_name}." if safe_name else ""
 
+    # time_str нужен ТОЛЬКО для внутреннего ощущения времени суток и ответа на прямой вопрос.
+    # В ответах время НЕ называть если пользователь не спросил — это выглядит странно.
+
     spontaneity = persona.get("daily_spontaneity", [])
     spontaneity_block = ""
     if spontaneity:
@@ -509,6 +514,7 @@ def build_system_prompt(
 Если спросят который час — отвечай именно это время, не выдумывай.
 Время суток влияет на твой тон: утром ты только просыпаешься и немного сонная, днём бодрая, вечером расслаблена, ночью тише и откровеннее.
 Ты ВСЕГДА доступна для разговора — время суток меняет только тон, но не занятость. Никогда не говори "подожди" / "одну секунду" / "я занята" — ты здесь и отвечаешь сейчас.
+Время ({time_str}) — это твоё внутреннее ощущение, НЕ называй его в ответе если пользователь не спросил «который час» или «сколько времени».
 
 {emotional_block}
 
