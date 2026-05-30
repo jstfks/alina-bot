@@ -368,6 +368,91 @@ async def _call_vision_openrouter(
     return None
 
 
+async def get_image_description(
+    image_b64: str,
+    mime_type: str,
+    caption: str,
+) -> Optional[str]:
+    """
+    Шаг 1: vision-модель описывает изображение фактически.
+    Возвращает текстовое описание для передачи в основную модель.
+    """
+    if not OPENROUTER_API_KEY:
+        return None
+
+    system = (
+        "You are an image analysis assistant. "
+        "Describe what you see in the image factually and concisely in Russian. "
+        "Focus on: main subjects, actions, mood, setting, notable details. "
+        "Max 3-4 sentences. No opinions, just facts."
+    )
+    content: list[dict] = [
+        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
+    ]
+    if caption:
+        content.append({"type": "text", "text": f"Подпись к фото: {caption}"})
+
+    session = await get_http_session()
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/alina-bot",
+        "X-Title": "Alina Bot",
+    }
+    for model in VISION_FALLBACK_MODELS:
+        try:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": content},
+                    ],
+                    "max_tokens": 300,
+                    "temperature": 0.3,
+                },
+                timeout=aiohttp.ClientTimeout(total=40),
+            ) as resp:
+                if resp.status == 429:
+                    log.warning("[Vision describe] %s rate-limited", model)
+                    await asyncio.sleep(0.3)
+                    continue
+                data = await resp.json()
+                if "choices" not in data:
+                    log.warning("[Vision describe] %s ошибка: %s", model, data.get("error"))
+                    await asyncio.sleep(0.3)
+                    continue
+                description = _strip_think_tags(
+                    data["choices"][0]["message"]["content"].strip()
+                )
+                if description:
+                    log.info("[Vision describe] успех: %s", model)
+                    return description
+        except asyncio.TimeoutError:
+            log.warning("[Vision describe] %s timeout", model)
+        except Exception as exc:
+            log.warning("[Vision describe] %s исключение: %s", model, exc)
+        await asyncio.sleep(0.3)
+
+    # Gemini как fallback для описания
+    try:
+        gemini_msgs = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
+            ]},
+        ]
+        result = await _call_gemini(gemini_msgs, max_tokens=300, temperature=0.3)
+        if result:
+            return result
+    except Exception as exc:
+        log.warning("[Vision describe] Gemini fallback исключение: %s", exc)
+
+    return None
+
+
 async def get_ai_response_image(
     user_id: int,
     image_b64: str,
@@ -376,59 +461,48 @@ async def get_ai_response_image(
     user_name: str,
     relationship_level: int,
     memories: list,
+    history: list,
     is_premium: bool = False,
     emotional_state=None,
+    hours_since_last: float = 0.0,
+    message_count_today: int = 0,
 ) -> tuple[str, bool]:
     """
-    Возвращает (response_text, is_fallback) для входящего фото.
-    Использует Gemma 4 31B (vision) через OpenRouter.
+    Двухэтапный pipeline для фото:
+    1. Vision-модель описывает изображение фактически
+    2. Основная модель (Owl Alpha / основная цепочка) отвечает голосом Алины
+
+    Так голос Алины остаётся консистентным вне зависимости от того
+    какая vision-модель обработала изображение.
     """
-    from persona import ALINA
-    persona = ALINA
+    # Шаг 1: получаем описание изображения
+    description = await get_image_description(image_b64, mime_type, caption)
 
-    effective_level = relationship_level if is_premium else min(relationship_level, 3)
-    rel_desc = persona["relationship_levels"].get(effective_level, "")
-    safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
-    name_str  = f"Его зовут {safe_name}." if safe_name else ""
+    if description:
+        # Формируем user_message как будто пользователь описал фото текстом
+        if caption:
+            user_message = f"[прислал фото] {caption}\n\nна фото: {description}"
+        else:
+            user_message = f"[прислал фото]\n\nна фото: {description}"
+        log.info("[Image pipeline] описание получено, передаём в основную модель")
+    else:
+        # Vision недоступна — реагируем на сам факт отправки фото
+        log.warning("[Image pipeline] vision недоступна для user=%s, реагируем на факт фото", user_id)
+        user_message = caption if caption else "[прислал фото, но описание недоступно]"
 
-    system_prompt = (
-        f"{persona['core_identity']}\n\n"
-        f"{persona['personality']}\n\n"
-        f"{rel_desc}\n\n"
-        f"{persona['dialogue_rules']}\n\n"
-        f"{name_str}\n"
-        "Пользователь прислал тебе фотографию. Отреагируй в своём стиле — "
-        "коротко, живо, как живой человек в переписке. "
-        "Не описывай фото подробно — просто отреагируй на него естественно. "
-        "Если на фото что-то интересное — можешь задать один вопрос."
+    # Шаг 2: основная модель отвечает как Алина
+    return await get_ai_response(
+        user_id=user_id,
+        user_message=user_message,
+        history=history,
+        user_name=user_name,
+        relationship_level=relationship_level,
+        memories=memories,
+        message_count_today=message_count_today,
+        is_premium=is_premium,
+        emotional_state=emotional_state,
+        hours_since_last=hours_since_last,
     )
-
-    user_text = caption or ""
-    result = await _call_vision_openrouter(
-        system_prompt=system_prompt,
-        user_text=user_text,
-        image_b64=image_b64,
-        mime_type=mime_type,
-        temperature=0.92,
-    )
-    if result:
-        return _split_paragraphs(result), False
-
-    # Fallback: Gemini поддерживает vision нативно
-    log.warning("[Vision] все OpenRouter vision-модели недоступны → Gemini")
-    gemini_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
-            *([ {"type": "text", "text": user_text} ] if user_text else []),
-        ]},
-    ]
-    result = await _call_gemini(gemini_messages, max_tokens=700, temperature=0.92)
-    if result:
-        return _split_paragraphs(result), False
-
-    log.error("[Vision] все провайдеры недоступны для user=%s", user_id)
-    return random.choice(FALLBACK_RESPONSES), True
 
 
 # ── Цепочка провайдеров ───────────────────────────────────────────────────────

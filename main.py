@@ -604,10 +604,21 @@ async def _process_photo(message: Message) -> None:
         emotional_state = await get_emotional_state(user_id)
         caption = message.caption or ""
 
-        # ── Сохраняем факт отправки фото в историю ────────────────────────────
+        # ── История для контекста (основная модель будет отвечать с историей) ──
+        history_before = await get_history(user_id, limit=30)
+
+        # ── Время с последнего сообщения ─────────────────────────────────────
+        hours_since_last: float = 0.0
+        if upersona.last_interaction:
+            last_ts = upersona.last_interaction
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            hours_since_last = (_now_utc() - last_ts).total_seconds() / 3600
+
+        # ── Сохраняем факт отправки фото в историю ───────────────────────────
         await save_message(user_id, "user", f"[фото]{': ' + caption if caption else ''}")
 
-        # ── AI-ответ ──────────────────────────────────────────────────────────
+        # ── AI-ответ (двухэтапный pipeline: vision describe → main model) ────
         try:
             response, is_fallback = await asyncio.wait_for(
                 get_ai_response_image(
@@ -618,10 +629,13 @@ async def _process_photo(message: Message) -> None:
                     user_name=user_name,
                     relationship_level=upersona.relationship_level,
                     memories=memories,
+                    history=history_before,
                     is_premium=premium,
                     emotional_state=emotional_state,
+                    hours_since_last=hours_since_last,
+                    message_count_today=0,
                 ),
-                timeout=75,
+                timeout=90,  # двухэтапный pipeline — чуть больше времени
             )
         except asyncio.TimeoutError:
             stop_typing.set()
