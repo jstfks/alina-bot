@@ -53,11 +53,14 @@ OPENROUTER_FALLBACK_MODELS = [
 ]
 
 VISION_FALLBACK_MODELS = [
-    "google/gemma-4-31b-it:free",                          # Dense 31B, vision подтверждена
-    "google/gemma-4-26b-a4b-it:free",                      # MoE 26B, также vision
-    "moonshotai/kimi-k2.6:free",                           # Kimi vision
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  # Omni — возможно vision
-    "nvidia/nemotron-nano-12b-v2-vl:free",                 # VL — vision подтверждена
+    "qwen/qwen2.5-vl-72b-instruct:free",           # приоритет 1 — Qwen VL 72B
+    "qwen/qwen2.5-vl-32b-instruct",                # приоритет 2 — Qwen VL 32B
+    "google/gemma-4-31b-it:free",                  # приоритет 3 — Gemma 4 31B
+    "mistralai/pixtral-12b",                       # приоритет 4 — Pixtral 12B
+    "google/gemma-4-26b-a4b-it:free",              # резерв
+    "moonshotai/kimi-k2.6:free",                   # резерв
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  # резерв
+    "nvidia/nemotron-nano-12b-v2-vl:free",         # резерв
 ]
 
 
