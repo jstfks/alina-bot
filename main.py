@@ -301,9 +301,9 @@ async def _send_usd_invoice(chat_id: int, days: int) -> None:
 
 # Словарь: plan_key → (человекочитаемый label, функция-отправщик инвойса)
 _PLAN_META: dict[str, tuple[str, ...]] = {
-    "light_24h": ("Безлимит 24 часа за 99 ⭐",  "light_24h"),
-    "pack_30":   ("30 сообщений за 79 ⭐",        "pack_30"),
-    "week_299":  ("Неделя вместе за 299 ⭐",      "week_299"),
+    "light_24h": ("Безлимит 24 часа за 65 ⭐",  "light_24h"),
+    "pack_30":   ("30 сообщений за 40 ⭐",        "pack_30"),
+    "week_299":  ("Неделя вместе за 150 ⭐",      "week_299"),
     # /premium — Stars
     "stars_week":  ("Premium 7 дней за 300 ⭐",  "stars_week"),
     "stars_month": ("Premium 30 дней за 1100 ⭐", "stars_month"),
