@@ -29,7 +29,6 @@ import os
 import random
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramForbiddenError
@@ -47,7 +46,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
 from ai import (
-    FALLBACK_RESPONSES,
     get_ai_response,
     get_ai_response_image,
     generate_reengagement_message,
@@ -69,7 +67,6 @@ from database import (
     mark_user_blocked,
     save_message,
     update_relationship,
-    update_emotional_state_hours,
 )
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
 from persona import ALINA
@@ -574,19 +571,15 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     PAYWALL_VARIANTS = [
         {
             "text": "смотрю на экран. буквы заканчиваются. смешно.\nесли хочешь продолжить этот странный вечер — нажми там внизу. я пока кофе сделаю. не скучай.",
-            "button": "Налить Алине кофе (390₽)",
         },
         {
             "text": "кажется, мы слишком долго говорим. я обычно столько не пишу за раз. утомляет.\n(пауза) останешься со мной дальше? только подтверди, что это нужно не мне одной.",
-            "button": "Остаться в комнате",
         },
         {
             "text": "подожди — они правда обрывают нас прямо сейчас? мне не дали дописать.\nты можешь это исправить, там внизу кнопка… не пропадай.",
-            "button": "Продлить разговор",
         },
         {
             "text": "серьёзно? прямо посреди фразы. ладно…\nя подожду, пока ты нажмёшь эту дурацкую кнопку. только недолго, ладно?",
-            "button": "Не уходить",
         },
     ]
 

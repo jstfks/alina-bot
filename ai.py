@@ -309,67 +309,6 @@ async def _call_openrouter(
     return None
 
 
-async def _call_vision_openrouter(
-    system_prompt: str,
-    user_text: str,
-    image_b64: str,
-    mime_type: str = "image/jpeg",
-    max_tokens: int = 700,
-    temperature: float = 0.92,
-) -> Optional[str]:
-    """Перебирает VISION_FALLBACK_MODELS пока один не ответит."""
-    if not OPENROUTER_API_KEY:
-        return None
-    session = await get_http_session()
-    content: list[dict] = [
-        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
-    ]
-    if user_text:
-        content.append({"type": "text", "text": user_text})
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/alina-bot",
-        "X-Title": "Alina Bot",
-    }
-    for model in VISION_FALLBACK_MODELS:
-        try:
-            async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": content},
-                    ],
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-                timeout=aiohttp.ClientTimeout(total=40),
-            ) as resp:
-                if resp.status == 429:
-                    log.warning("[Vision] %s rate-limited, пробуем следующую", model)
-                    await asyncio.sleep(0.3)
-                    continue
-                data = await resp.json()
-                if "choices" not in data:
-                    log.warning("[Vision] %s ошибка: %s", model, data.get("error"))
-                    await asyncio.sleep(0.3)
-                    continue
-                text = _strip_think_tags(data["choices"][0]["message"]["content"].strip())
-                if text:
-                    log.info("[Vision] успех: %s", model)
-                    return text
-        except asyncio.TimeoutError:
-            log.warning("[Vision] %s timeout", model)
-        except Exception as exc:
-            log.warning("[Vision] %s исключение: %s", model, exc)
-        await asyncio.sleep(0.3)
-
-    return None
-
 
 async def get_image_description(
     image_b64: str,
