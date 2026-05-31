@@ -545,15 +545,32 @@ async def check_and_increment_usage(
 # ── Subscription ──────────────────────────────────────────────────────────────
 
 async def is_premium(user_id: int) -> bool:
+    """Возвращает True если у пользователя активная безлимитная подписка.
+    pack_30 не считается premium — он только добавляет 30 сообщений."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Subscription).where(
                 Subscription.user_id == user_id,
                 Subscription.status == "active",
                 Subscription.expires_at > _now_utc(),
+                Subscription.plan != "pack_30",  # пакет сообщений ≠ безлимит
             )
         )
         return result.scalar_one_or_none() is not None
+
+
+async def get_active_pack_bonus(user_id: int) -> int:
+    """Возвращает 30 если у пользователя активный пакет сообщений, иначе 0."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Subscription).where(
+                Subscription.user_id == user_id,
+                Subscription.status == "active",
+                Subscription.expires_at > _now_utc(),
+                Subscription.plan == "pack_30",
+            )
+        )
+        return 30 if result.scalar_one_or_none() is not None else 0
 
 
 async def activate_subscription(

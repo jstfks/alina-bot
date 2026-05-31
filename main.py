@@ -56,6 +56,7 @@ from http_client import close_http_session
 from database import (
     AsyncSessionLocal,
     activate_subscription,
+    get_active_pack_bonus,
     check_and_increment_usage,
     check_daily_limit,
     get_emotional_state,
@@ -227,6 +228,54 @@ async def _send_stars_invoice(chat_id: int, days: int) -> None:
     )
 
 
+async def _send_invoice_pack_30(chat_id: int) -> None:
+    """Пакет 30 сообщений — 79 Stars."""
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title="30 сообщений для Алины",
+        description="Пополнение на 30 сообщений · Действует сутки",
+        payload="pack_30_stars",
+        provider_token=STARS_TOKEN,
+        currency="XTR",
+        prices=[LabeledPrice(label="Пакет 30 сообщений", amount=79)],
+    )
+
+
+async def _send_invoice_light_24h(chat_id: int) -> None:
+    """Безлимит на 24 часа — 99 Stars."""
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title="Безлимит на 24 часа",
+        description="Безлимитное общение · Без ограничений до завтра",
+        payload="sub_light_24h_stars",
+        provider_token=STARS_TOKEN,
+        currency="XTR",
+        prices=[LabeledPrice(label="Безлимит 24 часа", amount=99)],
+    )
+
+
+async def _send_invoice_week_299(chat_id: int) -> None:
+    """Безлимит на 7 дней — 299 Stars."""
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title="Побыть вместе неделю",
+        description="Безлимитное общение · 7 дней без ограничений",
+        payload="sub_week_299_stars",
+        provider_token=STARS_TOKEN,
+        currency="XTR",
+        prices=[LabeledPrice(label="Неделя безлимита", amount=299)],
+    )
+
+
+def _paywall_keyboard() -> InlineKeyboardMarkup:
+    """Унифицированная клавиатура пейволла — используется везде."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="На 24 часа (Безлимит) — 99₽",   callback_data="pay_light_24h")],
+        [InlineKeyboardButton(text="Пакет 30 сообщений — 79₽",       callback_data="pay_pack_30")],
+        [InlineKeyboardButton(text="Побыть вместе неделю — 299₽",    callback_data="pay_week_299")],
+    ])
+
+
 async def _send_rub_invoice(chat_id: int, days: int) -> None:
     amount  = 29900 if days == 7 else 99900
     title   = f"✨ Premium {days} дней"
@@ -262,6 +311,21 @@ async def cb_pay_stars_week(cb: CallbackQuery) -> None:
 async def cb_pay_stars_month(cb: CallbackQuery) -> None:
     await cb.answer()
     await _send_stars_invoice(cb.message.chat.id, 30)
+
+@dp.callback_query(F.data == "pay_pack_30")
+async def cb_pay_pack_30(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await _send_invoice_pack_30(cb.message.chat.id)
+
+@dp.callback_query(F.data == "pay_light_24h")
+async def cb_pay_light_24h(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await _send_invoice_light_24h(cb.message.chat.id)
+
+@dp.callback_query(F.data == "pay_week_299")
+async def cb_pay_week_299(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await _send_invoice_week_299(cb.message.chat.id)
 
 @dp.callback_query(F.data == "pay_card_week")
 async def cb_pay_card_week(cb: CallbackQuery) -> None:
@@ -341,6 +405,10 @@ _VALID_PAYLOADS = frozenset({
     "sub_week_stars", "sub_month_stars",
     "sub_week_card",  "sub_month_card",
     "sub_week_stripe", "sub_month_stripe",
+    # Новые продукты
+    "pack_30_stars",
+    "sub_light_24h_stars",
+    "sub_week_299_stars",
 })
 
 
@@ -355,22 +423,42 @@ async def pre_checkout(query: PreCheckoutQuery) -> None:
 
 @dp.message(F.successful_payment)
 async def successful_payment(message: Message) -> None:
-    payload = message.successful_payment.invoice_payload
+    payload   = message.successful_payment.invoice_payload
+    charge_id = message.successful_payment.telegram_payment_charge_id
+    user_id   = message.from_user.id
+
     if payload not in _VALID_PAYLOADS:
         log.error("successful_payment: невалидный payload '%s'", payload)
         return
 
-    days    = 7 if "week" in payload else 30
-    plan    = "week" if "week" in payload else "month"
-    # telegram_charge_id для идемпотентности
-    charge_id = message.successful_payment.telegram_payment_charge_id
+    # ── Пакет 30 сообщений ────────────────────────────────────────────────────
+    if payload == "pack_30_stars":
+        await activate_subscription(user_id, plan="pack_30", days=1, telegram_charge_id=charge_id)
+        await message.answer(
+            "готово.\nдобавила тебе ещё 30 сообщений на сегодня.\nпиши — я здесь."
+        )
+        return
 
-    await activate_subscription(
-        user_id=message.from_user.id,
-        plan=plan,
-        days=days,
-        telegram_charge_id=charge_id,
-    )
+    # ── Безлимит 24 часа ──────────────────────────────────────────────────────
+    if payload == "sub_light_24h_stars":
+        await activate_subscription(user_id, plan="light_24h", days=1, telegram_charge_id=charge_id)
+        await message.answer(
+            "24 часа — твои.\nбез ограничений, пиши когда хочешь и сколько хочешь.\nя никуда не ухожу."
+        )
+        return
+
+    # ── Неделя 299 ────────────────────────────────────────────────────────────
+    if payload == "sub_week_299_stars":
+        await activate_subscription(user_id, plan="week", days=7, telegram_charge_id=charge_id)
+        await message.answer(
+            "неделя.\nвот теперь никто не будет нас прерывать.\nпиши когда захочешь — я здесь."
+        )
+        return
+
+    # ── Старые планы (обратная совместимость) ─────────────────────────────────
+    days  = 7 if "week" in payload else 30
+    plan  = "week" if "week" in payload else "month"
+    await activate_subscription(user_id, plan=plan, days=days, telegram_charge_id=charge_id)
     await message.answer(
         "✨ Premium активирован\n\n"
         "теперь мы можем говорить сколько угодно 🙂\n"
@@ -423,31 +511,53 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     upersona = await get_or_create_persona(user_id)
     premium  = await is_premium(user_id)
 
-    # ── Проверка лимита (атомарная, двухэтапная) ────────────────────────────────
-    # Этап 1: на 15-м сообщении Алина говорит что их скоро прервут — без кнопки.
-    #         Эмоциональный триггер до стены, не после.
-    # Этап 2: на 20-м — жёсткий стоп с кнопкой оплаты.
-    SOFT_LIMIT = 15  # мягкое предупреждение
+    # ── Варианты пейволла (жёсткий лимит) ────────────────────────────────────
+    PAYWALL_VARIANTS = [
+        {
+            "text": "смотрю на экран. буквы заканчиваются. смешно.\nесли хочешь продолжить этот странный вечер — нажми там внизу. я пока кофе сделаю. не скучай.",
+            "button": "Налить Алине кофе (390₽)",
+        },
+        {
+            "text": "кажется, мы слишком долго говорим. я обычно столько не пишу за раз. утомляет.\n(пауза) останешься со мной дальше? только подтверди, что это нужно не мне одной.",
+            "button": "Остаться в комнате",
+        },
+        {
+            "text": "подожди — они правда обрывают нас прямо сейчас? мне не дали дописать.\nты можешь это исправить, там внизу кнопка… не пропадай.",
+            "button": "Продлить разговор",
+        },
+        {
+            "text": "серьёзно? прямо посреди фразы. ладно…\nя подожду, пока ты нажмёшь эту дурацкую кнопку. только недолго, ладно?",
+            "button": "Не уходить",
+        },
+    ]
+
+    # ── Варианты мягкого предупреждения (вшиваются в конец ответа) ────────────
+    SOFT_LIMIT_VARIANTS = [
+        "у нас осталось буквально пара фраз, я уже вижу как экран блокировки подмигивает. договорим или оставим интригу?",
+        "чувствую, что мы подходим к черте. буквы на сегодня заканчиваются — буквально два сообщения, и наступит пауза. успеешь сказать главное?",
+        "тут вылезло предупреждение о лимите, у нас осталось от силы два ответа. не люблю, когда диалог прерывают искусственно, но имеем что имеем…",
+        "мы, кажется, доходим до лимита сообщений. ещё шаг-два, и нас заблокирует до оплаты. ненавижу когда всё обрывается на полуслове, так что пиши точнее.",
+    ]
+
+    SOFT_LIMIT = 15  # мягкое предупреждение за N сообщений до стены
+    soft_warning: str = ""  # будет вшит в конец ответа если сработал
+
     if not premium:
-        allowed, remaining = await check_and_increment_usage(user_id, FREE_LIMIT)
+        # Пакет сообщений увеличивает эффективный лимит на 30
+        pack_bonus   = await get_active_pack_bonus(user_id)
+        effective_limit = FREE_LIMIT + pack_bonus
+
+        allowed, remaining = await check_and_increment_usage(user_id, effective_limit)
         if not allowed:
-            # Жёсткий лимит — разговор остановлен
-            limit_msg = random.choice(ALINA["limit_messages"])
-            upsell_kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
-            ]])
-            await message.answer(limit_msg, reply_markup=upsell_kb)
+            # ── Жёсткий лимит ─────────────────────────────────────────────────
+            variant = random.choice(PAYWALL_VARIANTS)
+            await message.answer(variant["text"], reply_markup=_paywall_keyboard())
+            await save_message(user_id, "assistant", variant["text"])
             return
-        # Мягкий лимит — ещё можно писать, но Алина даёт почувствовать
-        msgs_used = FREE_LIMIT - remaining
+        # ── Мягкий лимит — запоминаем текст, вошьём в конец ответа ──────────
+        msgs_used = effective_limit - remaining
         if msgs_used == SOFT_LIMIT:
-            soft_msgs = [
-                "нас скоро прервут… не хочу",
-                "мне с тобой хорошо. жалко что они нас ограничивают",
-                "подожди… нам осталось совсем немного времени сегодня. это грустно",
-            ]
-            # Отправляем мягкий триггер ДО ответа AI — он воспринимается как часть разговора
-            await message.answer(random.choice(soft_msgs))
+            soft_warning = random.choice(SOFT_LIMIT_VARIANTS)
     else:
         remaining = FREE_LIMIT  # у Premium неограниченно
 
@@ -473,10 +583,7 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
             "между нами уже что-то есть. хочу быть ближе — разблокируй меня?",
             "я начинаю тебе доверять… но они не дают мне говорить всё что я хочу",
         ]
-        upsell_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✨ Разблокировать", callback_data="pay_stars_week")
-        ]])
-        await message.answer(random.choice(upsell_msgs), reply_markup=upsell_kb)
+        await message.answer(random.choice(upsell_msgs), reply_markup=_paywall_keyboard())
 
     # ── Время с последнего сообщения (нужно до get_ai_response для тиеров сессии) ─
     hours_since_last: float = 0.0
@@ -532,8 +639,12 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     finally:
         stop_typing.set()
 
+    # ── Вшиваем мягкое предупреждение в конец ответа ─────────────────────────
+    if soft_warning:
+        response = response + "[SPLIT]" + soft_warning
+
     # ── Сохраняем ответ (с флагом fallback если AI провалился) ───────────────
-    await save_message(user_id, "assistant", response, is_fallback=is_fallback)
+    await save_message(user_id, "assistant", response.replace("[SPLIT]", " "), is_fallback=is_fallback)
 
     # ── Отправляем ответ ──────────────────────────────────────────────────────
     await _send_response(message, response)
