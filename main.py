@@ -229,7 +229,7 @@ async def _send_stars_invoice(chat_id: int, days: int) -> None:
 
 
 async def _send_invoice_pack_30(chat_id: int) -> None:
-    """Пакет 30 сообщений — 79 Stars."""
+    """Пакет 30 сообщений — 50 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="30 сообщений для Алины",
@@ -237,12 +237,12 @@ async def _send_invoice_pack_30(chat_id: int) -> None:
         payload="pack_30_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Пакет 30 сообщений", amount=79)],
+        prices=[LabeledPrice(label="Пакет 30 сообщений", amount=50)],
     )
 
 
 async def _send_invoice_light_24h(chat_id: int) -> None:
-    """Безлимит на 24 часа — 99 Stars."""
+    """Безлимит на 24 часа — 65 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="Безлимит на 24 часа",
@@ -250,12 +250,12 @@ async def _send_invoice_light_24h(chat_id: int) -> None:
         payload="sub_light_24h_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Безлимит 24 часа", amount=99)],
+        prices=[LabeledPrice(label="Безлимит 24 часа", amount=65)],
     )
 
 
 async def _send_invoice_week_299(chat_id: int) -> None:
-    """Безлимит на 7 дней — 299 Stars."""
+    """Безлимит на 7 дней — 150 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="Побыть вместе неделю",
@@ -263,16 +263,16 @@ async def _send_invoice_week_299(chat_id: int) -> None:
         payload="sub_week_299_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Неделя безлимита", amount=299)],
+        prices=[LabeledPrice(label="Неделя безлимита", amount=150)],
     )
 
 
 def _paywall_keyboard() -> InlineKeyboardMarkup:
     """Унифицированная клавиатура пейволла — используется везде."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="На 24 часа (Безлимит) — 99₽",   callback_data="pay_light_24h")],
-        [InlineKeyboardButton(text="Пакет 30 сообщений — 79₽",       callback_data="pay_pack_30")],
-        [InlineKeyboardButton(text="Побыть вместе неделю — 299₽",    callback_data="pay_week_299")],
+        [InlineKeyboardButton(text="Ещё 30 фраз — 50⭐",       callback_data="pay_pack_30")],
+        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65⭐",   callback_data="pay_light_24h")],
+        [InlineKeyboardButton(text="Остаться на неделю — 150⭐",    callback_data="pay_week_299")],
     ])
 
 
