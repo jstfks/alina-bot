@@ -210,7 +210,7 @@ async def _send_stars_invoice(chat_id: int, days: int) -> None:
 
 
 async def _send_invoice_pack_30(chat_id: int) -> None:
-    """Еще 30 фраз — 79 Stars."""
+    """Еще 30 фраз — 40 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="30 сообщений для Алины",
@@ -236,7 +236,7 @@ async def _send_invoice_light_24h(chat_id: int) -> None:
 
 
 async def _send_invoice_week_299(chat_id: int) -> None:
-    """Остаться на неделю— 150 Stars."""
+    """Остаться на неделю — 150 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="Побыть вместе неделю",
