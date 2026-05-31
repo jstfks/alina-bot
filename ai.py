@@ -857,26 +857,73 @@ async def generate_reengagement_message(
     hours_inactive: int,
     last_summary: str,
     relationship_level: int,
-) -> str:
+) -> Optional[str]:
+    """
+    Генерирует сообщение-реактивацию от Алины.
+
+    Возвращает None если сейчас тихие часы (23:00–08:00 МСК) —
+    вызывающий код должен проверить это и пропустить отправку.
+
+    Исправления:
+    - Фильтр тихих часов (не пишем ночью)
+    - Полный system_prompt вместо голого user-промпта (голос Алины консистентен)
+    - daily_spontaneity как seed для тона
+    - Тон дифференцирован по времени молчания
+    """
+    # ── Тихие часы ────────────────────────────────────────────────────────────
+    MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
+    now    = datetime.datetime.now(tz=MOSCOW)
+    if not (8 <= now.hour < 23):
+        log.info("[Reengagement] тихие часы %02d:%02d МСК — пропускаем", now.hour, now.minute)
+        return None
+
     persona = ALINA
 
+    # ── Тон по времени молчания ───────────────────────────────────────────────
     if hours_inactive < 12:
-        examples = persona["reengagement"]["6h"]
-    elif hours_inactive < 72:
-        examples = persona["reengagement"]["24h"]
+        examples  = persona["reengagement"]["6h"]
+        tone_hint = "Просто напомни о себе — коротко, без драмы."
+    elif hours_inactive < 48:
+        examples  = persona["reengagement"]["24h"]
+        tone_hint = "Не писал больше суток. Тепло, без упрёков, без давления."
     else:
-        examples = persona["reengagement"]["72h"]
+        examples  = persona["reengagement"]["72h"]
+        tone_hint = "Долго не было. Одна фраза — не требование, просто сигнал что ты здесь."
 
-    safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
+    safe_name  = _sanitise_prompt_string(user_name or "", max_len=50)
 
-    prompt = (
-        f"Ты — Алина. Напиши одно короткое сообщение пользователю {safe_name}. "
-        f"Он не писал {hours_inactive} часов. "
-        f"Примеры стиля (не копируй, придумай своё): {', '.join(examples[:3])}. "
-        f"Уровень отношений: {relationship_level}/5. "
-        f"Только текст, одно предложение."
+    # ── Системный промпт — полный голос Алины ─────────────────────────────────
+    system_prompt = build_system_prompt(
+        user_name         = safe_name,
+        relationship_level= relationship_level,
+        memories          = [],
+        session_message_count = 0,
+        emotional_state   = None,
+        arc_block         = "",
+        gap_block         = "",
+        nsfw_block        = "",
     )
 
-    messages = [{"role": "user", "content": prompt}]
-    result = await _route_and_call(messages, max_tokens=120, temperature=0.9)
+    # ── daily_spontaneity как seed для тона ───────────────────────────────────
+    spontaneity      = persona.get("daily_spontaneity", [])
+    spontaneity_seed = random.sample(spontaneity, min(2, len(spontaneity))) if spontaneity else []
+    seed_line = (
+        f"Для вдохновения — её последние мысли: {', '.join(spontaneity_seed)}.\n"
+        if spontaneity_seed else ""
+    )
+
+    user_prompt = (
+        f"ЗАДАЧА: Алина пишет первой. Одно короткое сообщение.\n"
+        f"Пользователь не писал {hours_inactive} часов.\n"
+        f"{tone_hint}\n"
+        f"Примеры стиля (не копируй — вдохновляйся): {', '.join(examples[:3])}.\n"
+        f"{seed_line}"
+        f"Только текст. Одно-два коротких предложения максимум."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt},
+    ]
+    result = await _route_and_call(messages, max_tokens=120, temperature=0.85)
     return result or random.choice(examples)

@@ -880,6 +880,9 @@ async def _send_reengagement(user_id: int, first_name: str, user_name_given: str
     """
     Фактическая отправка reengagement-сообщения.
     Вызывается планировщиком с задержкой — не напрямую из check_inactive_users.
+
+    generate_reengagement_message возвращает None в тихие часы (23:00–08:00 МСК).
+    В этом случае просто пропускаем — следующий запуск scheduler попробует снова.
     """
     async with _REENGAGEMENT_SEMAPHORE:
         try:
@@ -890,6 +893,9 @@ async def _send_reengagement(user_id: int, first_name: str, user_name_given: str
                 last_summary       = "",
                 relationship_level = relationship_level,
             )
+            if msg is None:
+                log.info("Reengagement user=%s пропущен — тихие часы МСК", user_id)
+                return
             await bot.send_message(user_id, msg)
             log.info("Reengagement → user=%s (%dh)", user_id, hours_inactive)
         except TelegramForbiddenError:
