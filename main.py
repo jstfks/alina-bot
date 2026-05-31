@@ -226,15 +226,6 @@ def _kb_help_back() -> InlineKeyboardMarkup:
     ])
 
 
-def _kb_help_sub_free(select_prefix: str = "select") -> InlineKeyboardMarkup:
-    """Клавиатура раздела «Подписка» для free-пользователя — тарифы + назад."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Пакет 30 сообщений — 79 ⭐",      callback_data=f"{select_prefix}_pack_30")],
-        [InlineKeyboardButton(text="На 24 часа (Безлимит) — 99 ⭐",   callback_data=f"{select_prefix}_light_24h")],
-        [InlineKeyboardButton(text="Побыть вместе неделю — 299 ⭐",   callback_data=f"{select_prefix}_week_299")],
-        [InlineKeyboardButton(text="← Назад",                         callback_data="help_main")],
-    ])
-
 
 def _kb_help_sub_premium() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -284,27 +275,13 @@ async def cb_help_sub(cb: CallbackQuery) -> None:
             f"🆓 Бесплатный план — осталось {remaining} сообщений.\n\n"
             "Чтобы общаться без ограничений, выбери подходящий вариант:"
         )
-        await cb.message.edit_text(text, reply_markup=_kb_help_sub_free())
+        await cb.message.edit_text(text, reply_markup=_paywall_keyboard(back_button=True))
 
     await cb.answer()
 
 
 # ── /premium и клавиатура оплаты ──────────────────────────────────────────────
 
-
-@dp.message(Command("premium"))
-async def cmd_premium(message: Message) -> None:
-    if await is_premium(message.from_user.id):
-        await message.answer("✨ Premium активен\n\nМожем говорить сколько угодно 🙂")
-        return
-    await message.answer(
-        "✨ Premium — безлимитное общение\n\n"
-        "Без ограничений на сообщения\n"
-        "Полная память наших разговоров\n"
-        "Более глубокое общение\n\n"
-        "Выбери план:",
-        reply_markup=_build_premium_keyboard_select(),
-    )
 
 
 # ── Вспомогательные функции для invoice ──────────────────────────────────────
@@ -360,13 +337,20 @@ async def _send_invoice_week_299(chat_id: int) -> None:
     )
 
 
-def _paywall_keyboard() -> InlineKeyboardMarkup:
-    """Унифицированная клавиатура пейволла — используется везде."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Еще 30 фраз — 40 ⭐",       callback_data="select_pack_30")],
-        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65 ⭐",   callback_data="select_light_24h")],
+def _paywall_keyboard(back_button: bool = False) -> InlineKeyboardMarkup:
+    """
+    Единственная клавиатура тарифов — используется везде:
+    жёсткий пейволл, /help → Подписка и лимиты, возврат после «Изменить тариф».
+    back_button=True добавляет «← Назад» (для контекста /help).
+    """
+    rows = [
+        [InlineKeyboardButton(text="Ещё 30 фраз — 40 ⭐",            callback_data="select_pack_30")],
+        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65 ⭐",  callback_data="select_light_24h")],
         [InlineKeyboardButton(text="Остаться на неделю — 150 ⭐",    callback_data="select_week_299")],
-    ])
+    ]
+    if back_button:
+        rows.append([InlineKeyboardButton(text="← Назад", callback_data="help_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _confirm_keyboard(plan_key: str, label: str) -> InlineKeyboardMarkup:
@@ -502,31 +486,19 @@ async def cb_confirm_pay(cb: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "back_to_plans")
 async def cb_back_to_plans(cb: CallbackQuery) -> None:
+    # Определяем контекст: пришли из /help или из пейволла?
+    # В /help текст содержит "осталось" (статус лимита) или "Подписка".
+    # В пейволле — текст Алины из PAYWALL_VARIANTS, там этих слов нет.
+    msg_text = cb.message.text or ""
+    from_help = "осталось" in msg_text or "Подписка" in msg_text
     try:
-        await cb.message.edit_reply_markup(reply_markup=_paywall_keyboard())
+        await cb.message.edit_reply_markup(
+            reply_markup=_paywall_keyboard(back_button=from_help)
+        )
     except Exception:
         pass
     await cb.answer()
 
-
-# ── /premium — инлайн-клавиатура тоже переходит на select_* ─────────────────
-
-def _build_premium_keyboard_select() -> InlineKeyboardMarkup:
-    buttons: list[list[InlineKeyboardButton]] = [[
-        InlineKeyboardButton(text="⭐ 7 дней — 300 Stars",  callback_data="select_stars_week"),
-        InlineKeyboardButton(text="⭐ 30 дней — 1100 Stars", callback_data="select_stars_month"),
-    ]]
-    if YOOKASSA_TOKEN:
-        buttons.append([
-            InlineKeyboardButton(text="💳 7 дней — 299 ₽",  callback_data="select_card_week"),
-            InlineKeyboardButton(text="💳 30 дней — 999 ₽", callback_data="select_card_month"),
-        ])
-    if STRIPE_TOKEN:
-        buttons.append([
-            InlineKeyboardButton(text="🌍 7 days — $3",  callback_data="select_int_week"),
-            InlineKeyboardButton(text="🌍 30 days — $11", callback_data="select_int_month"),
-        ])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ── Legacy /pay_* команды (обратная совместимость) ────────────────────────────
