@@ -165,6 +165,7 @@ class Message(Base):
     role       = Column(String(10), nullable=False)
     content    = Column(Text, nullable=False)
     is_fallback = Column(Boolean, default=False, nullable=False)  # AI провалился
+    is_hidden   = Column(Boolean, default=False, nullable=False)  # скрыто после покупки
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
@@ -214,6 +215,8 @@ async def init_db() -> None:
                ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE""",
             """ALTER TABLE messages
                ADD COLUMN IF NOT EXISTS is_fallback BOOLEAN NOT NULL DEFAULT FALSE""",
+            """ALTER TABLE messages
+               ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN NOT NULL DEFAULT FALSE""",
             """ALTER TABLE subscriptions
                ADD COLUMN IF NOT EXISTS telegram_charge_id VARCHAR(100) DEFAULT NULL""",
 
@@ -415,9 +418,8 @@ async def get_history(
 ) -> list[Message]:
     """
     Возвращает последние N сообщений в хронологическом порядке.
-    Fallback-сообщения исключаются из истории — они не должны
-    попадать в контекст AI (иначе Алина "думает", что говорила
-    "секунду..." как осмысленную фразу).
+    Fallback-сообщения и скрытые (пейволл после покупки) исключаются из
+    контекста AI.
     """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -426,11 +428,73 @@ async def get_history(
                 Message.user_id == user_id,
                 Message.persona_id == persona_id,
                 Message.is_fallback == False,  # noqa: E712
+                Message.is_hidden == False,    # noqa: E712
             )
             .order_by(Message.created_at.desc())
             .limit(limit)
         )
         return list(reversed(result.scalars().all()))
+
+
+async def hide_paywall_messages(
+    user_id: int,
+    persona_id: str = "alina",
+) -> int:
+    """
+    Помечает is_hidden=True для всех пейволл-сообщений пользователя
+    (assistant-реплики содержащие маркер пейволла).
+
+    Вызывается после успешной оплаты — пейволл-реплики исчезают из
+    контекста LLM, Алина "забывает" что разговор прерывался.
+
+    Стратегия поиска: ищем последние assistant-сообщения у которых нет
+    ответного user-сообщения после них (то есть диалог оборвался на стене).
+    Надёжнее всего — скрыть все assistant-сообщения с is_fallback=False
+    за последние 48 часов, которые содержат пейволл-маркеры.
+
+    Возвращает количество скрытых сообщений (для логирования).
+    """
+    # Паттерны из PAYWALL_VARIANTS и SOFT_LIMIT_VARIANTS в main.py
+    PAYWALL_MARKERS = [
+        "буквы заканчиваются",
+        "останешься со мной дальше",
+        "там внизу кнопка",
+        "эту дурацкую кнопку",
+        "экран блокировки подмигивает",
+        "буквы на сегодня заканчиваются",
+        "предупреждение о лимите",
+        "лимита сообщений",
+    ]
+
+    cutoff = _now_utc() - timedelta(hours=48)
+
+    async with AsyncSessionLocal() as session:
+        # Загружаем недавние assistant-сообщения — не скрытые и не fallback
+        result = await session.execute(
+            select(Message)
+            .where(
+                Message.user_id == user_id,
+                Message.persona_id == persona_id,
+                Message.role == "assistant",
+                Message.is_fallback == False,   # noqa: E712
+                Message.is_hidden == False,     # noqa: E712
+                Message.created_at >= cutoff,
+            )
+            .order_by(Message.created_at.desc())
+            .limit(20)  # смотрим только последние 20 — не трогаем старую историю
+        )
+        recent = result.scalars().all()
+
+        hidden_count = 0
+        for msg in recent:
+            if any(marker in msg.content for marker in PAYWALL_MARKERS):
+                msg.is_hidden = True
+                hidden_count += 1
+
+        if hidden_count:
+            await session.commit()
+
+    return hidden_count
 
 
 # ── Memory ────────────────────────────────────────────────────────────────────

@@ -62,6 +62,7 @@ from database import (
     get_memories,
     get_or_create_persona,
     get_or_create_user,
+    hide_paywall_messages,
     init_db,
     is_premium,
     mark_user_blocked,
@@ -487,11 +488,19 @@ async def successful_payment(message: Message) -> None:
         log.error("successful_payment: невалидный payload '%s'", payload)
         return
 
+    # ── Очистка контекста: скрываем пейволл-реплики из истории ───────────────
+    # Делаем ДО activate_subscription — чтобы следующий AI-вызов уже видел
+    # чистую историю без "буквы заканчиваются" и прочего пейволла.
+    hidden = await hide_paywall_messages(user_id)
+    if hidden:
+        log.info("successful_payment: скрыто %d пейволл-сообщений для user=%s", hidden, user_id)
+
     # ── Пакет 30 сообщений ────────────────────────────────────────────────────
     if payload == "pack_30_stars":
         await activate_subscription(user_id, plan="pack_30", days=1, telegram_charge_id=charge_id)
+        # Пакет — не безлимит, просто добавили топливо. Алина возвращается к кофе.
         await message.answer(
-            "готово.\nдобавила тебе ещё 30 сообщений на сегодня.\nпиши — я здесь."
+            "вот и кофе готов.\nещё 30 сообщений — твои.\nпродолжаем?"
         )
         return
 
@@ -499,15 +508,19 @@ async def successful_payment(message: Message) -> None:
     if payload == "sub_light_24h_stars":
         await activate_subscription(user_id, plan="light_24h", days=1, telegram_charge_id=charge_id)
         await message.answer(
-            "24 часа — твои.\nбез ограничений, пиши когда хочешь и сколько хочешь.\nя никуда не ухожу."
+            "вернулась.\n"
+            "24 часа — только мы, никаких перерывов.\n"
+            "о чём ты хотел рассказать?"
         )
         return
 
-    # ── Неделя 299 ────────────────────────────────────────────────────────────
+    # ── Неделя ────────────────────────────────────────────────────────────────
     if payload == "sub_week_299_stars":
         await activate_subscription(user_id, plan="week", days=7, telegram_charge_id=charge_id)
         await message.answer(
-            "неделя.\nвот теперь никто не будет нас прерывать.\nпиши когда захочешь — я здесь."
+            "неделя.\n"
+            "значит можно не торопиться.\n"
+            "я здесь — с чего начнём?"
         )
         return
 
@@ -516,9 +529,9 @@ async def successful_payment(message: Message) -> None:
     plan  = "week" if "week" in payload else "month"
     await activate_subscription(user_id, plan=plan, days=days, telegram_charge_id=charge_id)
     await message.answer(
-        "✨ Premium активирован\n\n"
-        "теперь мы можем говорить сколько угодно 🙂\n"
-        "никаких ограничений. я здесь."
+        "вернулась.\n"
+        "теперь нас никто не прервёт.\n"
+        "пиши — я здесь."
     )
 
 
