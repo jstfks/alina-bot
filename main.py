@@ -181,23 +181,6 @@ async def cmd_help(message: Message) -> None:
 
 # ── /premium и клавиатура оплаты ──────────────────────────────────────────────
 
-def _build_premium_keyboard() -> InlineKeyboardMarkup:
-    buttons: list[list[InlineKeyboardButton]] = [[
-        InlineKeyboardButton(text="⭐ 7 дней — 300 Stars",  callback_data="pay_stars_week"),
-        InlineKeyboardButton(text="⭐ 30 дней — 1100 Stars", callback_data="pay_stars_month"),
-    ]]
-    if YOOKASSA_TOKEN:
-        buttons.append([
-            InlineKeyboardButton(text="💳 7 дней — 299 ₽",  callback_data="pay_card_week"),
-            InlineKeyboardButton(text="💳 30 дней — 999 ₽", callback_data="pay_card_month"),
-        ])
-    if STRIPE_TOKEN:
-        buttons.append([
-            InlineKeyboardButton(text="🌍 7 days — $3",  callback_data="pay_int_week"),
-            InlineKeyboardButton(text="🌍 30 days — $11", callback_data="pay_int_month"),
-        ])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 @dp.message(Command("premium"))
 async def cmd_premium(message: Message) -> None:
@@ -210,7 +193,7 @@ async def cmd_premium(message: Message) -> None:
         "Полная память наших разговоров\n"
         "Более глубокое общение\n\n"
         "Выбери план:",
-        reply_markup=_build_premium_keyboard(),
+        reply_markup=_build_premium_keyboard_select(),
     )
 
 
@@ -229,7 +212,7 @@ async def _send_stars_invoice(chat_id: int, days: int) -> None:
 
 
 async def _send_invoice_pack_30(chat_id: int) -> None:
-    """Пакет 30 сообщений — 50 Stars."""
+    """Пакет 30 сообщений — 79 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="30 сообщений для Алины",
@@ -237,12 +220,12 @@ async def _send_invoice_pack_30(chat_id: int) -> None:
         payload="pack_30_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Пакет 30 сообщений", amount=50)],
+        prices=[LabeledPrice(label="Пакет 30 сообщений", amount=79)],
     )
 
 
 async def _send_invoice_light_24h(chat_id: int) -> None:
-    """Безлимит на 24 часа — 65 Stars."""
+    """Безлимит на 24 часа — 99 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="Безлимит на 24 часа",
@@ -250,12 +233,12 @@ async def _send_invoice_light_24h(chat_id: int) -> None:
         payload="sub_light_24h_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Безлимит 24 часа", amount=65)],
+        prices=[LabeledPrice(label="Безлимит 24 часа", amount=99)],
     )
 
 
 async def _send_invoice_week_299(chat_id: int) -> None:
-    """Безлимит на 7 дней — 150 Stars."""
+    """Безлимит на 7 дней — 299 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="Побыть вместе неделю",
@@ -263,16 +246,27 @@ async def _send_invoice_week_299(chat_id: int) -> None:
         payload="sub_week_299_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Неделя безлимита", amount=150)],
+        prices=[LabeledPrice(label="Неделя безлимита", amount=299)],
     )
 
 
 def _paywall_keyboard() -> InlineKeyboardMarkup:
     """Унифицированная клавиатура пейволла — используется везде."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Ещё 30 фраз — 50⭐",       callback_data="pay_pack_30")],
-        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65⭐",   callback_data="pay_light_24h")],
-        [InlineKeyboardButton(text="Остаться на неделю — 150⭐",    callback_data="pay_week_299")],
+        [InlineKeyboardButton(text="На 24 часа (Безлимит) — 99 ⭐",   callback_data="select_light_24h")],
+        [InlineKeyboardButton(text="Пакет 30 сообщений — 79 ⭐",       callback_data="select_pack_30")],
+        [InlineKeyboardButton(text="Побыть вместе неделю — 299 ⭐",    callback_data="select_week_299")],
+    ])
+
+
+def _confirm_keyboard(plan_key: str, label: str) -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения выбранного тарифа."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"💳 Подтвердить оплату: {label}",
+            callback_data=f"pay_{plan_key}",
+        )],
+        [InlineKeyboardButton(text="↩️ Изменить тариф", callback_data="back_to_plans")],
     ])
 
 
@@ -300,64 +294,129 @@ async def _send_usd_invoice(chat_id: int, days: int) -> None:
     )
 
 
-# ── Callback-обработчики оплаты ───────────────────────────────────────────────
+# ── Callback-обработчики оплаты (двухшаговый флоу) ───────────────────────────
+#
+# Шаг 1: select_* — меняем кнопки прямо в сообщении Алины на подтверждение.
+#         Инвойс НЕ отправляется. Можно кликать по тарифам сколько угодно.
+# Шаг 2: pay_*   — пользователь нажал «Подтвердить», отправляем один инвойс.
+# back_to_plans  — возвращаем исходную клавиатуру тарифов.
 
-@dp.callback_query(F.data == "pay_stars_week")
-async def cb_pay_stars_week(cb: CallbackQuery) -> None:
-    await cb.answer()
-    await _send_stars_invoice(cb.message.chat.id, 7)
+# Словарь: plan_key → (человекочитаемый label, функция-отправщик инвойса)
+_PLAN_META: dict[str, tuple[str, ...]] = {
+    "light_24h": ("Безлимит 24 часа за 99 ⭐",  "light_24h"),
+    "pack_30":   ("30 сообщений за 79 ⭐",        "pack_30"),
+    "week_299":  ("Неделя вместе за 299 ⭐",      "week_299"),
+    # /premium — Stars
+    "stars_week":  ("Premium 7 дней за 300 ⭐",  "stars_week"),
+    "stars_month": ("Premium 30 дней за 1100 ⭐", "stars_month"),
+    # /premium — карта (RUB)
+    "card_week":   ("Premium 7 дней — 299 ₽",   "card_week"),
+    "card_month":  ("Premium 30 дней — 999 ₽",  "card_month"),
+    # /premium — Stripe (USD)
+    "int_week":    ("Premium 7 days — $3",       "int_week"),
+    "int_month":   ("Premium 30 days — $11",     "int_month"),
+}
 
-@dp.callback_query(F.data == "pay_stars_month")
-async def cb_pay_stars_month(cb: CallbackQuery) -> None:
-    await cb.answer()
-    await _send_stars_invoice(cb.message.chat.id, 30)
 
-@dp.callback_query(F.data == "pay_pack_30")
-async def cb_pay_pack_30(cb: CallbackQuery) -> None:
-    await cb.answer()
-    await _send_invoice_pack_30(cb.message.chat.id)
+async def _fire_invoice(plan_key: str, chat_id: int, answer_fn) -> None:
+    """Отправляет нужный инвойс по ключу тарифа."""
+    if plan_key == "light_24h":
+        await _send_invoice_light_24h(chat_id)
+    elif plan_key == "pack_30":
+        await _send_invoice_pack_30(chat_id)
+    elif plan_key == "week_299":
+        await _send_invoice_week_299(chat_id)
+    elif plan_key == "stars_week":
+        await _send_stars_invoice(chat_id, 7)
+    elif plan_key == "stars_month":
+        await _send_stars_invoice(chat_id, 30)
+    elif plan_key == "card_week":
+        if not YOOKASSA_TOKEN:
+            await answer_fn("этот способ пока недоступен")
+        else:
+            await _send_rub_invoice(chat_id, 7)
+    elif plan_key == "card_month":
+        if not YOOKASSA_TOKEN:
+            await answer_fn("этот способ пока недоступен")
+        else:
+            await _send_rub_invoice(chat_id, 30)
+    elif plan_key == "int_week":
+        if not STRIPE_TOKEN:
+            await answer_fn("этот способ пока недоступен")
+        else:
+            await _send_usd_invoice(chat_id, 7)
+    elif plan_key == "int_month":
+        if not STRIPE_TOKEN:
+            await answer_fn("этот способ пока недоступен")
+        else:
+            await _send_usd_invoice(chat_id, 30)
 
-@dp.callback_query(F.data == "pay_light_24h")
-async def cb_pay_light_24h(cb: CallbackQuery) -> None:
-    await cb.answer()
-    await _send_invoice_light_24h(cb.message.chat.id)
 
-@dp.callback_query(F.data == "pay_week_299")
-async def cb_pay_week_299(cb: CallbackQuery) -> None:
-    await cb.answer()
-    await _send_invoice_week_299(cb.message.chat.id)
+# ── Шаг 1: выбор тарифа → показываем подтверждение в том же сообщении ────────
 
-@dp.callback_query(F.data == "pay_card_week")
-async def cb_pay_card_week(cb: CallbackQuery) -> None:
-    await cb.answer()
-    if not YOOKASSA_TOKEN:
-        await cb.message.answer("этот способ пока недоступен")
+@dp.callback_query(F.data.startswith("select_"))
+async def cb_select_plan(cb: CallbackQuery) -> None:
+    plan_key = cb.data.removeprefix("select_")
+    meta = _PLAN_META.get(plan_key)
+    if not meta:
+        await cb.answer("неизвестный тариф", show_alert=True)
         return
-    await _send_rub_invoice(cb.message.chat.id, 7)
-
-@dp.callback_query(F.data == "pay_card_month")
-async def cb_pay_card_month(cb: CallbackQuery) -> None:
+    label = meta[0]
+    try:
+        await cb.message.edit_reply_markup(
+            reply_markup=_confirm_keyboard(plan_key, label)
+        )
+    except Exception:
+        pass  # сообщение могло быть удалено — просто игнорируем
     await cb.answer()
-    if not YOOKASSA_TOKEN:
-        await cb.message.answer("этот способ пока недоступен")
-        return
-    await _send_rub_invoice(cb.message.chat.id, 30)
 
-@dp.callback_query(F.data == "pay_int_week")
-async def cb_pay_int_week(cb: CallbackQuery) -> None:
-    await cb.answer()
-    if not STRIPE_TOKEN:
-        await cb.message.answer("этот способ пока недоступен")
-        return
-    await _send_usd_invoice(cb.message.chat.id, 7)
 
-@dp.callback_query(F.data == "pay_int_month")
-async def cb_pay_int_month(cb: CallbackQuery) -> None:
-    await cb.answer()
-    if not STRIPE_TOKEN:
-        await cb.message.answer("этот способ пока недоступен")
+# ── Шаг 2: подтверждение → отправляем один инвойс ────────────────────────────
+
+@dp.callback_query(F.data.startswith("pay_"))
+async def cb_confirm_pay(cb: CallbackQuery) -> None:
+    plan_key = cb.data.removeprefix("pay_")
+    if plan_key not in _PLAN_META:
+        await cb.answer("неизвестный тариф", show_alert=True)
         return
-    await _send_usd_invoice(cb.message.chat.id, 30)
+    # Убираем кнопки из сообщения — инвойс уже летит, нечего нажимать повторно
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer()
+    await _fire_invoice(plan_key, cb.message.chat.id, cb.message.answer)
+
+
+# ── Назад к выбору тарифа ────────────────────────────────────────────────────
+
+@dp.callback_query(F.data == "back_to_plans")
+async def cb_back_to_plans(cb: CallbackQuery) -> None:
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_paywall_keyboard())
+    except Exception:
+        pass
+    await cb.answer()
+
+
+# ── /premium — инлайн-клавиатура тоже переходит на select_* ─────────────────
+
+def _build_premium_keyboard_select() -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = [[
+        InlineKeyboardButton(text="⭐ 7 дней — 300 Stars",  callback_data="select_stars_week"),
+        InlineKeyboardButton(text="⭐ 30 дней — 1100 Stars", callback_data="select_stars_month"),
+    ]]
+    if YOOKASSA_TOKEN:
+        buttons.append([
+            InlineKeyboardButton(text="💳 7 дней — 299 ₽",  callback_data="select_card_week"),
+            InlineKeyboardButton(text="💳 30 дней — 999 ₽", callback_data="select_card_month"),
+        ])
+    if STRIPE_TOKEN:
+        buttons.append([
+            InlineKeyboardButton(text="🌍 7 days — $3",  callback_data="select_int_week"),
+            InlineKeyboardButton(text="🌍 30 days — $11", callback_data="select_int_month"),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ── Legacy /pay_* команды (обратная совместимость) ────────────────────────────
