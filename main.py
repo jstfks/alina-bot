@@ -209,7 +209,7 @@ async def _send_stars_invoice(chat_id: int, days: int) -> None:
 
 
 async def _send_invoice_pack_30(chat_id: int) -> None:
-    """Пакет 30 сообщений — 79 Stars."""
+    """Еще 30 фраз — 79 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="30 сообщений для Алины",
@@ -217,12 +217,12 @@ async def _send_invoice_pack_30(chat_id: int) -> None:
         payload="pack_30_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Пакет 30 сообщений", amount=79)],
+        prices=[LabeledPrice(label="Ещё 30 фраз", amount=40)],
     )
 
 
 async def _send_invoice_light_24h(chat_id: int) -> None:
-    """Безлимит на 24 часа — 99 Stars."""
+    """Побыть вместе 24 часа — 65 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="Безлимит на 24 часа",
@@ -230,12 +230,12 @@ async def _send_invoice_light_24h(chat_id: int) -> None:
         payload="sub_light_24h_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Безлимит 24 часа", amount=99)],
+        prices=[LabeledPrice(label="Побыть вместе 24 часа", amount=65)],
     )
 
 
 async def _send_invoice_week_299(chat_id: int) -> None:
-    """Безлимит на 7 дней — 299 Stars."""
+    """Остаться на неделю— 150 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
         title="Побыть вместе неделю",
@@ -243,16 +243,16 @@ async def _send_invoice_week_299(chat_id: int) -> None:
         payload="sub_week_299_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Неделя безлимита", amount=299)],
+        prices=[LabeledPrice(label="Остаться на неделю", amount=150)],
     )
 
 
 def _paywall_keyboard() -> InlineKeyboardMarkup:
     """Унифицированная клавиатура пейволла — используется везде."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="На 24 часа (Безлимит) — 99 ⭐",   callback_data="select_light_24h")],
-        [InlineKeyboardButton(text="Пакет 30 сообщений — 79 ⭐",       callback_data="select_pack_30")],
-        [InlineKeyboardButton(text="Побыть вместе неделю — 299 ⭐",    callback_data="select_week_299")],
+        [InlineKeyboardButton(text="Еще 30 фраз — 40 ⭐",       callback_data="select_pack_30")],
+        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65 ⭐",   callback_data="select_light_24h")],
+        [InlineKeyboardButton(text="Остаться на неделю — 150 ⭐",    callback_data="select_week_299")],
     ])
 
 
@@ -260,7 +260,7 @@ def _confirm_keyboard(plan_key: str, label: str) -> InlineKeyboardMarkup:
     """Клавиатура подтверждения выбранного тарифа."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"💳 Подтвердить оплату: {label}",
+            text=f"💳 Оплатить: {label}",
             callback_data=f"pay_{plan_key}",
         )],
         [InlineKeyboardButton(text="↩️ Изменить тариф", callback_data="back_to_plans")],
