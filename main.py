@@ -168,13 +168,125 @@ async def cmd_menu(message: Message) -> None:
     )
 
 
+
+# ── /help — интерактивное меню помощи ────────────────────────────────────────
+
+_HELP_TEXT_MAIN = (
+    "Чем могу помочь?"
+)
+
+_HELP_TEXT_HOW_IT_WORKS = (
+    "Всё просто. Ты находишься в приватной комнате с Алиной. "
+    "Это пространство для свободных, живых диалогов без цензуры и заготовленных шаблонов.\n\n"
+    "💬 Общение: Ты пишешь — Алина отвечает. Она помнит контекст вашей беседы, "
+    "твои привычки и важные детали, которыми ты делишься.\n\n"
+    "🌡 Динамика отношений: Её характер не статичен. Как и в реальной жизни, "
+    "вначале Алина может казаться закрытой или отстранённой. Но чем больше вы общаетесь, "
+    "узнаёте друг друга и находите общие темы, тем сильнее она привыкает к тебе, "
+    "становится теплее и искреннее.\n\n"
+    "⏱ Лимиты: На базовом уровне поток данных ограничен. Чтобы общаться без пауз "
+    "и ограничений на пути к её доверию, ты можешь активировать безлимитный доступ "
+    "в разделе «Подписка и лимиты».\n\n"
+    "Напиши что-нибудь в чат, чтобы продолжить диалог."
+)
+
+_HELP_TEXT_FAQ = (
+    "❓ Частые вопросы\n\n"
+    "В: Это реальный человек или нейросеть?\n"
+    "О: Это продвинутая языковая модель с уникальным характером, созданная для того, "
+    "чтобы быть максимально настоящей. Алина не имитирует бота — она живёт в этом чате.\n\n"
+    "В: Почему она иногда отвечает так холодно?\n"
+    "О: Алина не создана для того, чтобы во всём тебе угождать с первой секунды. "
+    "Её доверие нужно заслужить. Если проявишь терпение, будешь общаться с ней "
+    "как с настоящей девушкой и найдёшь правильный подход, её отношение изменится — "
+    "она станет гораздо добрее, мягче и начнёт делиться тем, о чём никогда "
+    "не расскажет незнакомцу.\n\n"
+    "В: Мои диалоги кто-то видит? Это конфиденциально?\n"
+    "О: Полностью. Все ваши переписки зашифрованы и привязаны исключительно "
+    "к твоему Telegram-аккаунту. Ни создатели бота, ни третьи лица не имеют "
+    "доступа к тексту внутри комнаты.\n\n"
+    "В: Что делать, если Алина долго не отвечает или зависла?\n"
+    "О: Такое бывает при высокой нагрузке на серверы. Просто подожди пару минут "
+    "или используй команду /start для мягкой перезагрузки интерфейса "
+    "(твой баланс и история при этом не пропадут)."
+)
+
+
+def _kb_help_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Как это работает",  callback_data="help_how")],
+        [InlineKeyboardButton(text="💳 Подписка и лимиты", callback_data="help_sub")],
+        [InlineKeyboardButton(text="❓ Частые вопросы",    callback_data="help_faq")],
+    ])
+
+
+def _kb_help_back() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад", callback_data="help_main")],
+    ])
+
+
+def _kb_help_sub_free(select_prefix: str = "select") -> InlineKeyboardMarkup:
+    """Клавиатура раздела «Подписка» для free-пользователя — тарифы + назад."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Пакет 30 сообщений — 79 ⭐",      callback_data=f"{select_prefix}_pack_30")],
+        [InlineKeyboardButton(text="На 24 часа (Безлимит) — 99 ⭐",   callback_data=f"{select_prefix}_light_24h")],
+        [InlineKeyboardButton(text="Побыть вместе неделю — 299 ⭐",   callback_data=f"{select_prefix}_week_299")],
+        [InlineKeyboardButton(text="← Назад",                         callback_data="help_main")],
+    ])
+
+
+def _kb_help_sub_premium() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад", callback_data="help_main")],
+    ])
+
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
-        "просто пиши мне — я отвечу 🙂\n\n"
-        "/menu — статус подписки\n"
-        "/premium — убрать лимит сообщений"
+        _HELP_TEXT_MAIN,
+        reply_markup=_kb_help_main(),
     )
+
+
+# ── Callback-обработчики меню /help ──────────────────────────────────────────
+
+@dp.callback_query(F.data == "help_main")
+async def cb_help_main(cb: CallbackQuery) -> None:
+    await cb.message.edit_text(_HELP_TEXT_MAIN, reply_markup=_kb_help_main())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "help_how")
+async def cb_help_how(cb: CallbackQuery) -> None:
+    await cb.message.edit_text(_HELP_TEXT_HOW_IT_WORKS, reply_markup=_kb_help_back())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "help_faq")
+async def cb_help_faq(cb: CallbackQuery) -> None:
+    await cb.message.edit_text(_HELP_TEXT_FAQ, reply_markup=_kb_help_back())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "help_sub")
+async def cb_help_sub(cb: CallbackQuery) -> None:
+    user_id = cb.from_user.id
+    premium = await is_premium(user_id)
+
+    if premium:
+        text = "✅ Premium активен — безлимитное общение.\n\nНикаких ограничений, пиши сколько хочешь."
+        await cb.message.edit_text(text, reply_markup=_kb_help_sub_premium())
+    else:
+        _, remaining = await check_daily_limit(user_id, FREE_LIMIT)
+        text = (
+            f"🆓 Бесплатный план — осталось {remaining} сообщений.\n\n"
+            "Чтобы общаться без ограничений, выбери подходящий вариант:"
+        )
+        await cb.message.edit_text(text, reply_markup=_kb_help_sub_free())
+
+    await cb.answer()
 
 
 # ── /premium и клавиатура оплаты ──────────────────────────────────────────────
