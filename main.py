@@ -496,13 +496,20 @@ async def successful_payment(message: Message) -> None:
         log.info("successful_payment: скрыто %d пейволл-сообщений для user=%s", hidden, user_id)
 
     # ── Пакет 30 сообщений ────────────────────────────────────────────────────
+    # pack_30 — просто топливо, не подписка. Уровень отношений не меняем.
     if payload == "pack_30_stars":
         await activate_subscription(user_id, plan="pack_30", days=1, telegram_charge_id=charge_id)
-        # Пакет — не безлимит, просто добавили топливо. Алина возвращается к кофе.
         await message.answer(
             "вот и кофе готов.\nещё 30 сообщений — твои.\nпродолжаем?"
         )
         return
+
+    # ── Буст отношений при покупке подписки (+125 очков) ─────────────────────
+    # Не меняет уровень мгновенно (порог уровня 2 = 150), но ускоряет
+    # естественный переход: пользователь выйдет на уровень 2 уже через
+    # несколько первых сообщений после оплаты, а не через десятки.
+    await update_relationship(user_id, delta=125.0)
+    log.info("successful_payment: relationship +125 для user=%s", user_id)
 
     # ── Безлимит 24 часа ──────────────────────────────────────────────────────
     if payload == "sub_light_24h_stars":
