@@ -875,23 +875,45 @@ async def _send_response(message: Message, response: str) -> None:
 _REENGAGEMENT_SEMAPHORE = asyncio.Semaphore(5)
 
 
-async def check_inactive_users() -> None:
+async def _send_reengagement(user_id: int, first_name: str, user_name_given: str,
+                              hours_inactive: int, relationship_level: int) -> None:
     """
-    Запускается каждый час.
+    Фактическая отправка reengagement-сообщения.
+    Вызывается планировщиком с задержкой — не напрямую из check_inactive_users.
+    """
+    async with _REENGAGEMENT_SEMAPHORE:
+        try:
+            await update_hours_since_message(user_id, float(hours_inactive))
+            msg = await generate_reengagement_message(
+                user_name          = user_name_given or first_name or "",
+                hours_inactive     = hours_inactive,
+                last_summary       = "",
+                relationship_level = relationship_level,
+            )
+            await bot.send_message(user_id, msg)
+            log.info("Reengagement → user=%s (%dh)", user_id, hours_inactive)
+        except TelegramForbiddenError:
+            log.info("user=%s заблокировал бота — помечаем", user_id)
+            await mark_user_blocked(user_id)
+        except Exception as exc:
+            log.error("Reengagement ошибка user=%s: %s", user_id, exc)
+
+
+async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
+    """
+    Запускается каждый час. Находит кандидатов и планирует отправку
+    с случайной задержкой 0–120 минут — сообщение не приходит ровно
+    в :00, Алина пишет как живой человек.
 
     Частота reengagement:
-      Premium → 6, 24, 48, 72 часа  (Алина пишет чаще — это видимое преимущество)
-      Free    → 24, 72 часа          (реже, чтобы разница ощущалась)
-
-    Пропускает заблокировавших пользователей.
-    Семафор ограничивает concurrent AI-вызовы.
+      Premium → 6, 24, 48, 72 часа
+      Free    → 24, 72 часа
     """
     from sqlalchemy import select as sa_select
     from database import User, UserPersona
 
     now = _now_utc()
 
-    # Разные наборы триггерных часов для free и premium
     PREMIUM_HOURS = {6, 24, 48, 72}
     FREE_HOURS    = {24, 72}
 
@@ -910,38 +932,42 @@ async def check_inactive_users() -> None:
 
     log.info("Reengagement: проверяем %d кандидатов", len(rows))
 
-    async def _send_one(user, persona) -> None:
-        async with _REENGAGEMENT_SEMAPHORE:
-            last_active = user.last_active
-            if last_active.tzinfo is None:
-                last_active = last_active.replace(tzinfo=timezone.utc)
-            hours_inactive = int((now - last_active).total_seconds() / 3600)
+    for user, persona in rows:
+        last_active = user.last_active
+        if last_active.tzinfo is None:
+            last_active = last_active.replace(tzinfo=timezone.utc)
+        hours_inactive = int((now - last_active).total_seconds() / 3600)
 
-            # Определяем нужный набор часов в зависимости от статуса
-            user_is_premium = await is_premium(user.id)
-            target_hours = PREMIUM_HOURS if user_is_premium else FREE_HOURS
+        user_is_premium = await is_premium(user.id)
+        target_hours = PREMIUM_HOURS if user_is_premium else FREE_HOURS
 
-            if hours_inactive not in target_hours:
-                return
+        if hours_inactive not in target_hours:
+            continue
 
-            try:
-                await update_hours_since_message(user.id, float(hours_inactive))
-                msg = await generate_reengagement_message(
-                    user_name          = user.user_name_given or user.first_name or "",
-                    hours_inactive     = hours_inactive,
-                    last_summary       = "",
-                    relationship_level = persona.relationship_level,
-                )
-                await bot.send_message(user.id, msg)
-                log.info("Reengagement → user=%s (%dh)", user.id, hours_inactive)
-            except TelegramForbiddenError:
-                log.info("user=%s заблокировал бота — помечаем", user.id)
-                await mark_user_blocked(user.id)
-            except Exception as exc:
-                log.error("Reengagement ошибка user=%s: %s", user.id, exc)
+        # Случайная задержка 0–120 минут — Алина пишет не ровно в :00
+        delay_minutes = random.randint(0, 120)
+        run_at = now + timedelta(minutes=delay_minutes)
 
-    # Запускаем все отправки конкурентно, но ограниченно семафором
-    await asyncio.gather(*[_send_one(u, p) for u, p in rows], return_exceptions=True)
+        scheduler.add_job(
+            _send_reengagement,
+            trigger="date",
+            run_date=run_at,
+            args=[
+                user.id,
+                user.first_name or "",
+                user.user_name_given or "",
+                hours_inactive,
+                persona.relationship_level,
+            ],
+            misfire_grace_time=600,
+            id=f"reeng_{user.id}_{hours_inactive}",
+            replace_existing=True,  # не дублируем если уже запланировано
+        )
+        log.info(
+            "Reengagement запланирован: user=%s (%dh) через %d мин (~%s UTC)",
+            user.id, hours_inactive, delay_minutes,
+            run_at.strftime("%H:%M"),
+        )
 
 
 # ── Запуск ────────────────────────────────────────────────────────────────────
@@ -952,7 +978,11 @@ async def main() -> None:
     scheduler = AsyncIOScheduler(
         job_defaults={"misfire_grace_time": 600, "max_instances": 1}
     )
-    scheduler.add_job(check_inactive_users, "interval", hours=1)
+    scheduler.add_job(
+        lambda: asyncio.ensure_future(check_inactive_users(scheduler)),
+        "interval",
+        hours=1,
+    )
     scheduler.start()
     log.info("Планировщик запущен")
 
