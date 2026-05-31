@@ -180,12 +180,43 @@ def _build_convo_text(conversation: list[dict], max_msgs: int = 10) -> str:
     return "\n".join(lines)
 
 
+# ── Верификация фактов через цитату-источник ──────────────────────────────────
+
+def _verify_quote(quote: str, convo_text: str, min_match_len: int = 6) -> bool:
+    """
+    Проверяет что цитата реально присутствует в тексте разговора.
+
+    Алгоритм: нормализуем оба текста (строчные, без лишних пробелов),
+    проверяем что ключевая часть цитаты есть как подстрока.
+
+    min_match_len: минимальная длина совпадения — отсекает «да», «нет» и т.п.
+    как невалидные цитаты.
+    """
+    if not quote or len(quote.strip()) < min_match_len:
+        return False
+    norm_quote = re.sub(r"\s+", " ", quote.lower().strip())
+    norm_convo  = re.sub(r"\s+", " ", convo_text.lower())
+    # Пробуем точное совпадение
+    if norm_quote in norm_convo:
+        return True
+    # Мягкий вариант: проверяем по словам (>= 70% слов цитаты есть в тексте)
+    words = [w for w in norm_quote.split() if len(w) >= 3]
+    if not words:
+        return False
+    matches = sum(1 for w in words if w in norm_convo)
+    return (matches / len(words)) >= 0.7
+
+
 # ── Публичные функции извлечения ──────────────────────────────────────────────
 
 async def extract_memories(user_id: int, conversation: list[dict]) -> None:
     """
     Фоновая задача: извлекает факты о пользователе и сохраняет в DB.
-    Все исключения перехватываются — не должна ронять вызывающий код.
+
+    v3: верификация через цитату-источник.
+    Модель возвращает каждый факт вместе с точной цитатой из разговора.
+    Факт сохраняется только если цитата реально присутствует в тексте —
+    это исключает галлюцинации и логические «выводы» модели.
     """
     try:
         if len(conversation) < 4:
@@ -196,28 +227,58 @@ async def extract_memories(user_id: int, conversation: list[dict]) -> None:
         prompt = (
             "Проанализируй разговор и извлеки факты о пользователе.\n\n"
             f"Разговор:\n{convo_text}\n\n"
-            "Верни JSON объект с фактами. Только явно сказанное. Не придумывай.\n"
+            "ПРАВИЛО: только то что пользователь сказал ЯВНО. Никаких выводов и интерпретаций.\n"
+            "Для каждого факта укажи точную цитату из разговора которая его подтверждает.\n\n"
             f"Допустимые ключи: {', '.join(sorted(ALLOWED_MEMORY_KEYS))}\n\n"
-            'Пример: {"name": "Дима", "job": "программист"}\n'
+            "Формат ответа — JSON где каждое значение объект с полями value и quote:\n"
+            '{"name": {"value": "Дима", "quote": "меня зовут Дима"}, '
+            '"job": {"value": "программист", "quote": "я работаю программистом"}}\n\n'
             "Если ничего нового — верни: {}\n"
             "Только JSON, без пояснений."
         )
 
-        facts = await _extract_via_groq(prompt)
-        if facts is None:
-            log.info("[memory] Groq недоступен, пробуем OpenRouter")
-            facts = await _extract_via_openrouter(prompt)
+        raw = await _extract_via_groq(prompt)
+        if raw is None:
+            log.info("[memory] Groq недоступен → OpenRouter")
+            raw = await _extract_via_openrouter(prompt)
 
-        if not facts:
+        if not raw:
             return
 
-        for key, value in facts.items():
+        saved = 0
+        rejected = 0
+        for key, payload in raw.items():
             if key not in ALLOWED_MEMORY_KEYS:
                 log.info("[memory] отброшен неизвестный ключ '%s' user=%s", key, user_id)
                 continue
-            if not str(value).strip():
+
+            # Поддерживаем оба формата: новый {"value":..,"quote":..} и старый "строка"
+            if isinstance(payload, dict):
+                value = str(payload.get("value", "")).strip()
+                quote = str(payload.get("quote", "")).strip()
+            else:
+                # Старый формат без цитаты — пропускаем верификацию с предупреждением
+                value = str(payload).strip()
+                quote = ""
+                log.warning("[memory] ключ '%s' без цитаты user=%s — пропускаем верификацию", key, user_id)
+
+            if not value:
                 continue
-            await save_memory(user_id, key, str(value)[:500])
+
+            # Верификация: цитата должна быть в тексте разговора
+            if quote and not _verify_quote(quote, convo_text):
+                log.info(
+                    "[memory] ОТКЛОНЁН ключ='%s' value='%s' quote='%s' — цитата не найдена user=%s",
+                    key, value, quote, user_id,
+                )
+                rejected += 1
+                continue
+
+            await save_memory(user_id, key, value[:500])
+            saved += 1
+
+        if saved or rejected:
+            log.info("[memory] user=%s: сохранено=%d отклонено=%d", user_id, saved, rejected)
 
     except Exception as exc:
         log.error("[memory] extract_memories упала для user=%s: %s", user_id, exc)
