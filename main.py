@@ -339,24 +339,51 @@ async def _send_invoice_week_299(chat_id: int) -> None:
 
 def _paywall_keyboard(back_button: bool = False) -> InlineKeyboardMarkup:
     """
-    Единственная клавиатура тарифов — используется везде:
-    жёсткий пейволл, /help → Подписка и лимиты, возврат после «Изменить тариф».
+    Шаг 1: выбор тарифа (3 кнопки).
+    После нажатия — _payment_method_keyboard с выбором способа оплаты.
     back_button=True добавляет «← Назад» (для контекста /help).
     """
     rows = [
-        [InlineKeyboardButton(text="Ещё 30 фраз — 40 ⭐",             callback_data="select_pack_30")],
-        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65 ⭐",   callback_data="select_light_24h")],
-        [InlineKeyboardButton(text="Побыть вместе 24 часа — 99 ₽",   callback_data="select_light_24h_card")],
-        [InlineKeyboardButton(text="Остаться на неделю — 150 ⭐",     callback_data="select_week_299")],
-        [InlineKeyboardButton(text="Остаться на неделю — 299 ₽",     callback_data="select_week_299_card")],
+        [InlineKeyboardButton(text="Ещё 30 фраз",             callback_data="select_pack_30")],
+        [InlineKeyboardButton(text="Побыть вместе 24 часа",   callback_data="select_light_24h")],
+        [InlineKeyboardButton(text="Остаться на неделю",       callback_data="select_week_299")],
     ]
     if back_button:
         rows.append([InlineKeyboardButton(text="← Назад", callback_data="help_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# Цены тарифов по способу оплаты
+_TARIFF_PRICES = {
+    "pack_30":    {"stars": "40 ⭐",   "rub": None},        # пакет фраз — только Stars
+    "light_24h":  {"stars": "65 ⭐",   "rub": "99 ₽"},
+    "week_299":   {"stars": "150 ⭐",  "rub": "299 ₽"},
+}
+
+
+def _payment_method_keyboard(tariff: str) -> InlineKeyboardMarkup:
+    """
+    Шаг 2: выбор способа оплаты для выбранного тарифа.
+    Показывает кнопки Stars и (если есть) рублей + «← Назад».
+    """
+    prices = _TARIFF_PRICES.get(tariff, {})
+    rows = []
+    if prices.get("stars"):
+        rows.append([InlineKeyboardButton(
+            text=f"⭐ Оплатить звёздами — {prices['stars']}",
+            callback_data=f"pay_{tariff}",
+        )])
+    if prices.get("rub") and YOOKASSA_TOKEN:
+        rows.append([InlineKeyboardButton(
+            text=f"💳 Оплатить картой — {prices['rub']}",
+            callback_data=f"pay_{tariff}_card",
+        )])
+    rows.append([InlineKeyboardButton(text="↩️ Изменить тариф", callback_data="back_to_plans")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _confirm_keyboard(plan_key: str, label: str) -> InlineKeyboardMarkup:
-    """Клавиатура подтверждения выбранного тарифа."""
+    """Клавиатура подтверждения — используется в /premium флоу (Stars/карта)."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=f"💳 Оплатить: {label}",
@@ -425,15 +452,16 @@ async def _send_usd_invoice(chat_id: int, days: int) -> None:
 
 # Словарь: plan_key → (человекочитаемый label, функция-отправщик инвойса)
 _PLAN_META: dict[str, tuple[str, ...]] = {
-    "light_24h": ("Безлимит 24 часа за 65 ⭐",  "light_24h"),
-    "pack_30":   ("30 сообщений за 40 ⭐",        "pack_30"),
-    "week_299":  ("Неделя вместе за 150 ⭐",      "week_299"),
-    # /premium — Stars
-    "stars_week":  ("Premium 7 дней за 300 ⭐",  "stars_week"),
-    "stars_month": ("Premium 30 дней за 1100 ⭐", "stars_month"),
     # Пейволл — карта (RUB)
     "light_24h_card": ("Безлимит 24 часа — 99 ₽",   "light_24h_card"),
     "week_299_card":  ("Неделя вместе — 299 ₽",      "week_299_card"),
+    # Пейволл — Stars (используются из _payment_method_keyboard)
+    "light_24h":  ("Побыть вместе 24 часа — 65 ⭐", "light_24h"),
+    "pack_30":    ("Ещё 30 фраз — 40 ⭐",            "pack_30"),
+    "week_299":   ("Остаться на неделю — 150 ⭐",    "week_299"),
+    # /premium — Stars
+    "stars_week":  ("Premium 7 дней за 300 ⭐",  "stars_week"),
+    "stars_month": ("Premium 30 дней за 1100 ⭐", "stars_month"),
     # /premium — карта (RUB)
     "card_week":   ("Premium 7 дней — 299 ₽",   "card_week"),
     "card_month":  ("Premium 30 дней — 999 ₽",  "card_month"),
@@ -487,26 +515,24 @@ async def _fire_invoice(plan_key: str, chat_id: int, answer_fn) -> None:
             await _send_usd_invoice(chat_id, 30)
 
 
-# ── Шаг 1: выбор тарифа → показываем подтверждение в том же сообщении ────────
+# ── Шаг 1: выбор тарифа → показываем способы оплаты ─────────────────────────
 
 @dp.callback_query(F.data.startswith("select_"))
 async def cb_select_plan(cb: CallbackQuery) -> None:
-    plan_key = cb.data.removeprefix("select_")
-    meta = _PLAN_META.get(plan_key)
-    if not meta:
+    tariff = cb.data.removeprefix("select_")
+    if tariff not in _TARIFF_PRICES:
         await cb.answer("неизвестный тариф", show_alert=True)
         return
-    label = meta[0]
     try:
         await cb.message.edit_reply_markup(
-            reply_markup=_confirm_keyboard(plan_key, label)
+            reply_markup=_payment_method_keyboard(tariff)
         )
     except Exception:
-        pass  # сообщение могло быть удалено — просто игнорируем
+        pass
     await cb.answer()
 
 
-# ── Шаг 2: подтверждение → отправляем один инвойс ────────────────────────────
+# ── Шаг 2: выбор способа оплаты → отправляем инвойс ─────────────────────────
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def cb_confirm_pay(cb: CallbackQuery) -> None:
