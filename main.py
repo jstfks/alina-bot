@@ -279,7 +279,6 @@ async def cb_help_sub(cb: CallbackQuery) -> None:
 
     await cb.answer()
 
-
 # ── /premium и клавиатура оплаты ──────────────────────────────────────────────
 
 
@@ -315,7 +314,7 @@ async def _send_invoice_light_24h(chat_id: int) -> None:
     """Побыть вместе 24 часа — 65 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
-        title="Остаться на сутки",
+        title="Побыть вместе 24 часа",
         description="Безлимитное общение · Без ограничений до завтра",
         payload="sub_light_24h_stars",
         provider_token=STARS_TOKEN,
@@ -328,7 +327,7 @@ async def _send_invoice_week_299(chat_id: int) -> None:
     """Остаться на неделю — 150 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
-        title="Побыть вместе неделю",
+        title="Побыть вместе 7 дней",
         description="Безлимитное общение · 7 дней без ограничений",
         payload="sub_week_299_stars",
         provider_token=STARS_TOKEN,
@@ -397,7 +396,7 @@ async def _send_rub_invoice_light_24h(chat_id: int) -> None:
     """Безлимит 24 часа — 99 ₽."""
     await bot.send_invoice(
         chat_id=chat_id,
-        title="Остаться на сутки",
+        title="Побыть вместе 24 часа",
         description="Безлимитное общение · Без ограничений до завтра",
         payload="sub_light_24h_card",
         provider_token=YOOKASSA_TOKEN,
@@ -410,7 +409,7 @@ async def _send_rub_invoice_week_299(chat_id: int) -> None:
     """Неделя — 299 ₽."""
     await bot.send_invoice(
         chat_id=chat_id,
-        title="Остаться на неделю",
+        title="Побыть вместе 7 дней",
         description="Безлимитное общение · 7 дней без ограничений",
         payload="sub_week_299_card",
         provider_token=YOOKASSA_TOKEN,
