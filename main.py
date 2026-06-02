@@ -315,12 +315,12 @@ async def _send_invoice_light_24h(chat_id: int) -> None:
     """Побыть вместе 24 часа — 65 Stars."""
     await bot.send_invoice(
         chat_id=chat_id,
-        title="Безлимит на 24 часа",
+        title="Остаться на сутки",
         description="Безлимитное общение · Без ограничений до завтра",
         payload="sub_light_24h_stars",
         provider_token=STARS_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice(label="Побыть вместе 24 часа", amount=65)],
+        prices=[LabeledPrice(label="Остаться на сутки", amount=65)],
     )
 
 
@@ -344,8 +344,8 @@ def _paywall_keyboard(back_button: bool = False) -> InlineKeyboardMarkup:
     back_button=True добавляет «← Назад» (для контекста /help).
     """
     rows = [
-        [InlineKeyboardButton(text="Ещё 30 фраз",             callback_data="select_pack_30")],
-        [InlineKeyboardButton(text="Побыть вместе 24 часа",   callback_data="select_light_24h")],
+        [InlineKeyboardButton(text="Ещё 30 фраз для Алины",             callback_data="select_pack_30")],
+        [InlineKeyboardButton(text="Остаться на сутки",   callback_data="select_light_24h")],
         [InlineKeyboardButton(text="Остаться на неделю",       callback_data="select_week_299")],
     ]
     if back_button:
@@ -370,15 +370,15 @@ def _payment_method_keyboard(tariff: str) -> InlineKeyboardMarkup:
     rows = []
     if prices.get("stars"):
         rows.append([InlineKeyboardButton(
-            text=f"⭐ Оплатить звёздами — {prices['stars']}",
+            text=f"Оплатить через Telegram Stars — {prices['stars']}",
             callback_data=f"pay_{tariff}",
         )])
     if prices.get("rub") and YOOKASSA_TOKEN:
         rows.append([InlineKeyboardButton(
-            text=f"💳 Оплатить картой — {prices['rub']}",
+            text=f"Оплатить картой — {prices['rub']}",
             callback_data=f"pay_{tariff}_card",
         )])
-    rows.append([InlineKeyboardButton(text="↩️ Изменить тариф", callback_data="back_to_plans")])
+    rows.append([InlineKeyboardButton(text="↩️ Выбрать другой тариф", callback_data="back_to_plans")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -389,7 +389,7 @@ def _confirm_keyboard(plan_key: str, label: str) -> InlineKeyboardMarkup:
             text=f"💳 Оплатить: {label}",
             callback_data=f"pay_{plan_key}",
         )],
-        [InlineKeyboardButton(text="↩️ Изменить тариф", callback_data="back_to_plans")],
+        [InlineKeyboardButton(text="↩️ Выбрать другой тариф", callback_data="back_to_plans")],
     ])
 
 
@@ -397,12 +397,12 @@ async def _send_rub_invoice_light_24h(chat_id: int) -> None:
     """Безлимит 24 часа — 99 ₽."""
     await bot.send_invoice(
         chat_id=chat_id,
-        title="Безлимит на 24 часа",
+        title="Остаться на сутки",
         description="Безлимитное общение · Без ограничений до завтра",
         payload="sub_light_24h_card",
         provider_token=YOOKASSA_TOKEN,
         currency="RUB",
-        prices=[LabeledPrice(label="Побыть вместе 24 часа", amount=9900)],
+        prices=[LabeledPrice(label="Остаться на сутки", amount=9900)],
     )
 
 
@@ -410,7 +410,7 @@ async def _send_rub_invoice_week_299(chat_id: int) -> None:
     """Неделя — 299 ₽."""
     await bot.send_invoice(
         chat_id=chat_id,
-        title="Побыть вместе неделю",
+        title="Остаться на неделю",
         description="Безлимитное общение · 7 дней без ограничений",
         payload="sub_week_299_card",
         provider_token=YOOKASSA_TOKEN,
@@ -453,10 +453,10 @@ async def _send_usd_invoice(chat_id: int, days: int) -> None:
 # Словарь: plan_key → (человекочитаемый label, функция-отправщик инвойса)
 _PLAN_META: dict[str, tuple[str, ...]] = {
     # Пейволл — карта (RUB)
-    "light_24h_card": ("Безлимит 24 часа — 99 ₽",   "light_24h_card"),
-    "week_299_card":  ("Неделя вместе — 299 ₽",      "week_299_card"),
+    "light_24h_card": ("Остаться на сутки — 99 ₽",   "light_24h_card"),
+    "week_299_card":  ("Остаться на неделю — 299 ₽",      "week_299_card"),
     # Пейволл — Stars (используются из _payment_method_keyboard)
-    "light_24h":  ("Побыть вместе 24 часа — 65 ⭐", "light_24h"),
+    "light_24h":  ("Остаться на сутки — 65 ⭐", "light_24h"),
     "pack_30":    ("Ещё 30 фраз — 40 ⭐",            "pack_30"),
     "week_299":   ("Остаться на неделю — 150 ⭐",    "week_299"),
     # /premium — Stars
