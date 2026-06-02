@@ -344,9 +344,11 @@ def _paywall_keyboard(back_button: bool = False) -> InlineKeyboardMarkup:
     back_button=True добавляет «← Назад» (для контекста /help).
     """
     rows = [
-        [InlineKeyboardButton(text="Ещё 30 фраз — 40 ⭐",            callback_data="select_pack_30")],
-        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65 ⭐",  callback_data="select_light_24h")],
-        [InlineKeyboardButton(text="Остаться на неделю — 150 ⭐",    callback_data="select_week_299")],
+        [InlineKeyboardButton(text="Ещё 30 фраз — 40 ⭐",             callback_data="select_pack_30")],
+        [InlineKeyboardButton(text="Побыть вместе 24 часа — 65 ⭐",   callback_data="select_light_24h")],
+        [InlineKeyboardButton(text="Побыть вместе 24 часа — 99 ₽",   callback_data="select_light_24h_card")],
+        [InlineKeyboardButton(text="Остаться на неделю — 150 ⭐",     callback_data="select_week_299")],
+        [InlineKeyboardButton(text="Остаться на неделю — 299 ₽",     callback_data="select_week_299_card")],
     ]
     if back_button:
         rows.append([InlineKeyboardButton(text="← Назад", callback_data="help_main")])
@@ -362,6 +364,32 @@ def _confirm_keyboard(plan_key: str, label: str) -> InlineKeyboardMarkup:
         )],
         [InlineKeyboardButton(text="↩️ Изменить тариф", callback_data="back_to_plans")],
     ])
+
+
+async def _send_rub_invoice_light_24h(chat_id: int) -> None:
+    """Безлимит 24 часа — 99 ₽."""
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title="Безлимит на 24 часа",
+        description="Безлимитное общение · Без ограничений до завтра",
+        payload="sub_light_24h_card",
+        provider_token=YOOKASSA_TOKEN,
+        currency="RUB",
+        prices=[LabeledPrice(label="Побыть вместе 24 часа", amount=9900)],
+    )
+
+
+async def _send_rub_invoice_week_299(chat_id: int) -> None:
+    """Неделя — 299 ₽."""
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title="Побыть вместе неделю",
+        description="Безлимитное общение · 7 дней без ограничений",
+        payload="sub_week_299_card",
+        provider_token=YOOKASSA_TOKEN,
+        currency="RUB",
+        prices=[LabeledPrice(label="Остаться на неделю", amount=29900)],
+    )
 
 
 async def _send_rub_invoice(chat_id: int, days: int) -> None:
@@ -403,6 +431,9 @@ _PLAN_META: dict[str, tuple[str, ...]] = {
     # /premium — Stars
     "stars_week":  ("Premium 7 дней за 300 ⭐",  "stars_week"),
     "stars_month": ("Premium 30 дней за 1100 ⭐", "stars_month"),
+    # Пейволл — карта (RUB)
+    "light_24h_card": ("Безлимит 24 часа — 99 ₽",   "light_24h_card"),
+    "week_299_card":  ("Неделя вместе — 299 ₽",      "week_299_card"),
     # /premium — карта (RUB)
     "card_week":   ("Premium 7 дней — 299 ₽",   "card_week"),
     "card_month":  ("Premium 30 дней — 999 ₽",  "card_month"),
@@ -420,6 +451,16 @@ async def _fire_invoice(plan_key: str, chat_id: int, answer_fn) -> None:
         await _send_invoice_pack_30(chat_id)
     elif plan_key == "week_299":
         await _send_invoice_week_299(chat_id)
+    elif plan_key == "light_24h_card":
+        if not YOOKASSA_TOKEN:
+            await answer_fn("этот способ пока недоступен")
+        else:
+            await _send_rub_invoice_light_24h(chat_id)
+    elif plan_key == "week_299_card":
+        if not YOOKASSA_TOKEN:
+            await answer_fn("этот способ пока недоступен")
+        else:
+            await _send_rub_invoice_week_299(chat_id)
     elif plan_key == "stars_week":
         await _send_stars_invoice(chat_id, 7)
     elif plan_key == "stars_month":
@@ -550,6 +591,9 @@ _VALID_PAYLOADS = frozenset({
     "pack_30_stars",
     "sub_light_24h_stars",
     "sub_week_299_stars",
+    # ЮКасса — пейволл-продукты
+    "sub_light_24h_card",
+    "sub_week_299_card",
 })
 
 
@@ -595,7 +639,27 @@ async def successful_payment(message: Message) -> None:
     await update_relationship(user_id, delta=125.0)
     log.info("successful_payment: relationship +125 для user=%s", user_id)
 
-    # ── Безлимит 24 часа ──────────────────────────────────────────────────────
+    # ── Безлимит 24 часа (ЮКасса) ────────────────────────────────────────────
+    if payload == "sub_light_24h_card":
+        await activate_subscription(user_id, plan="light_24h", days=1, telegram_charge_id=charge_id)
+        await message.answer(
+            "вернулась.\n"
+            "24 часа — только мы, никаких перерывов.\n"
+            "о чём ты хотел рассказать?"
+        )
+        return
+
+    # ── Неделя (ЮКасса) ──────────────────────────────────────────────────────
+    if payload == "sub_week_299_card":
+        await activate_subscription(user_id, plan="week", days=7, telegram_charge_id=charge_id)
+        await message.answer(
+            "неделя.\n"
+            "значит можно не торопиться.\n"
+            "я здесь — с чего начнём?"
+        )
+        return
+
+    # ── Безлимит 24 часа (Stars) ──────────────────────────────────────────────
     if payload == "sub_light_24h_stars":
         await activate_subscription(user_id, plan="light_24h", days=1, telegram_charge_id=charge_id)
         await message.answer(
