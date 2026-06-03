@@ -92,9 +92,11 @@ def _require_env(name: str) -> str:
 
 BOT_TOKEN      = _require_env("BOT_TOKEN")
 FREE_LIMIT     = 40
-YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "")
-STRIPE_TOKEN   = os.getenv("STRIPE_TOKEN", "")
+YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "").strip().strip('"').strip("'")
+STRIPE_TOKEN   = os.getenv("STRIPE_TOKEN", "").strip().strip('"').strip("'")
 STARS_TOKEN    = ""  # Telegram Stars — токен провайдера не нужен
+
+log.info("YOOKASSA_TOKEN загружен: %s", "да" if YOOKASSA_TOKEN else "НЕТ — кнопка рублей не появится")
 
 # ── Bot & Dispatcher ──────────────────────────────────────────────────────────
 
@@ -363,7 +365,7 @@ _TARIFF_PRICES = {
 def _payment_method_keyboard(tariff: str) -> InlineKeyboardMarkup:
     """
     Шаг 2: выбор способа оплаты для выбранного тарифа.
-    Показывает кнопки Stars и (если есть) рублей + «← Назад».
+    Показывает кнопки Stars и (если есть цена) рублей + «← Назад».
     """
     prices = _TARIFF_PRICES.get(tariff, {})
     rows = []
@@ -372,7 +374,7 @@ def _payment_method_keyboard(tariff: str) -> InlineKeyboardMarkup:
             text=f"Оплатить через Telegram Stars — {prices['stars']}",
             callback_data=f"pay_{tariff}",
         )])
-    if prices.get("rub") and YOOKASSA_TOKEN:
+    if prices.get("rub"):
         rows.append([InlineKeyboardButton(
             text=f"Оплатить картой — {prices['rub']}",
             callback_data=f"pay_{tariff}_card",
