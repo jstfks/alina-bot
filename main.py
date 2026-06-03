@@ -72,7 +72,7 @@ from database import (
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
 from persona import ALINA
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ── Логирование ───────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -96,7 +96,7 @@ YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "").strip().strip('"').strip("'")
 STRIPE_TOKEN   = os.getenv("STRIPE_TOKEN", "").strip().strip('"').strip("'")
 STARS_TOKEN    = ""  # Telegram Stars — токен провайдера не нужен
 
-log.info("YOOKASSA_TOKEN загружен: %s", "да" if YOOKASSA_TOKEN else "НЕТ — кнопка рублей не появится")
+log.info("YOOKASSA_TOKEN: %s", "загружен ✓" if YOOKASSA_TOKEN else "НЕ НАЙДЕН ✗ — оплата картой недоступна")
 
 # ── Bot & Dispatcher ──────────────────────────────────────────────────────────
 
@@ -365,7 +365,7 @@ _TARIFF_PRICES = {
 def _payment_method_keyboard(tariff: str) -> InlineKeyboardMarkup:
     """
     Шаг 2: выбор способа оплаты для выбранного тарифа.
-    Показывает кнопки Stars и (если есть цена) рублей + «← Назад».
+    Показывает кнопки Stars и (если есть) рублей + «← Назад».
     """
     prices = _TARIFF_PRICES.get(tariff, {})
     rows = []
@@ -374,7 +374,7 @@ def _payment_method_keyboard(tariff: str) -> InlineKeyboardMarkup:
             text=f"Оплатить через Telegram Stars — {prices['stars']}",
             callback_data=f"pay_{tariff}",
         )])
-    if prices.get("rub"):
+    if prices.get("rub") and YOOKASSA_TOKEN:
         rows.append([InlineKeyboardButton(
             text=f"Оплатить картой — {prices['rub']}",
             callback_data=f"pay_{tariff}_card",
