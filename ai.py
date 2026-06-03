@@ -1,16 +1,17 @@
 """
-ai.py — Генерация AI-ответов с цепочкой провайдеров. v2.1 (hotfix).
+ai.py — Генерация AI-ответов с цепочкой провайдеров. v3.0
 
-Исправлен циклический импорт:
+Изменения v3.0:
+  - Переход на слоистую персону (persona/)
+  - from persona import ALINA → from persona import CORE_PROMPT, build_context_layers
+  - _nsfw_block() удалена — переехала в persona/layers.py
+  - build_system_prompt переработан: промпт уровня 1 ~790 токенов вместо ~2800
+  - Сигнатуры всех публичных функций не изменились
+
+Исправлен циклический импорт (v2.1):
   ai.py → memory.py → ai.py  (ImportError при старте)
-
-Решение: HTTP-сессия вынесена в http_client.py.
-  ai.py     → http_client.py  (нет петли)
-  memory.py → http_client.py  (нет петли)
-
-Импорт memory (build_memory_prompt, build_emotional_state_prompt) перенесён
-внутрь функции build_system_prompt — на момент вызова оба модуля уже
-полностью загружены.
+  Решение: HTTP-сессия вынесена в http_client.py.
+  Импорт memory внутри build_system_prompt — на момент вызова оба модуля загружены.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from typing import Optional
 
 import aiohttp
 
-from persona import ALINA
+from persona import CORE_PROMPT, build_context_layers
 from http_client import get_http_session, close_http_session  # noqa: F401 (re-export)
 
 log = logging.getLogger(__name__)
@@ -101,7 +102,6 @@ async def _call_deepseek(
             data = await resp.json()
             if "choices" not in data:
                 err = data.get("error", {})
-                # Insufficient Balance — баланс кончился, нужно пополнить
                 if "Insufficient Balance" in str(err):
                     log.error("[DeepSeek] БАЛАНС КОНЧИЛСЯ — пополните счёт на platform.deepseek.com")
                 else:
@@ -155,7 +155,6 @@ async def _call_gemini(
     try:
         async with session.post(
             url,
-            # API-ключ в заголовке, а не в URL — не попадает в логи запросов
             headers={
                 "x-goog-api-key": GEMINI_API_KEY,
                 "Content-Type": "application/json",
@@ -231,16 +230,9 @@ def _strip_think_tags(text: str) -> str:
     """
     Убирает <think>...</think> блоки из ответа.
     Qwen3 и некоторые другие модели добавляют их когда "думают вслух".
-    Пользователь не должен видеть внутренние рассуждения модели.
-    Обрабатывает три варианта:
-      - <think>...</think>         — закрытый блок
-      - <think>...                 — незакрытый блок (модель не успела закрыть)
-      - пустой ответ после обрезки — возвращаем None-сигнал (пустую строку)
     """
     import re
-    # Закрытый блок — убираем целиком (DOTALL = включая переносы строк)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    # Незакрытый блок — убираем от <think> до конца строки
     text = re.sub(r"<think>.*", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
 
@@ -269,7 +261,7 @@ async def _call_openrouter(
                     "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
-                    "top_p": 0.95,  # BOLT+ рекомендация
+                    "top_p": 0.95,
                 },
                 timeout=aiohttp.ClientTimeout(total=35),
             ) as resp:
@@ -282,7 +274,6 @@ async def _call_openrouter(
                     err  = data.get("error", {})
                     code = err.get("code", resp.status)
                     msg  = str(err.get("message", ""))[:120]
-                    # 404 = модель снята с OpenRouter, не перегружена
                     if resp.status == 404:
                         log.warning("[OpenRouter] %s — модель не найдена (снята?): %s", model, msg)
                     else:
@@ -294,7 +285,6 @@ async def _call_openrouter(
                 if text:
                     log.info("[OpenRouter] успех: %s", model)
                     return text
-                # После обрезки think-блоков ответ оказался пустым — пробуем следующую модель
                 log.warning("[OpenRouter] %s — пустой ответ после обрезки think-блоков", model)
                 await asyncio.sleep(0.3)
                 continue
@@ -309,6 +299,7 @@ async def _call_openrouter(
     return None
 
 
+# ── Vision pipeline ───────────────────────────────────────────────────────────
 
 async def get_image_description(
     image_b64: str,
@@ -412,27 +403,20 @@ async def get_ai_response_image(
     """
     Двухэтапный pipeline для фото:
     1. Vision-модель описывает изображение фактически
-    2. Основная модель (Owl Alpha / основная цепочка) отвечает голосом Алины
-
-    Так голос Алины остаётся консистентным вне зависимости от того
-    какая vision-модель обработала изображение.
+    2. Основная модель отвечает голосом Алины
     """
-    # Шаг 1: получаем описание изображения
     description = await get_image_description(image_b64, mime_type, caption)
 
     if description:
-        # Формируем user_message как будто пользователь описал фото текстом
         if caption:
             user_message = f"[прислал фото] {caption}\n\nна фото: {description}"
         else:
             user_message = f"[прислал фото]\n\nна фото: {description}"
         log.info("[Image pipeline] описание получено, передаём в основную модель")
     else:
-        # Vision недоступна — реагируем на сам факт отправки фото
         log.warning("[Image pipeline] vision недоступна для user=%s, реагируем на факт фото", user_id)
         user_message = caption if caption else "[прислал фото, но описание недоступно]"
 
-    # Шаг 2: основная модель отвечает как Алина
     return await get_ai_response(
         user_id=user_id,
         user_message=user_message,
@@ -546,82 +530,37 @@ def build_session_arc(session_message_count: int) -> tuple[float, str]:
     )
 
 
-# ── NSFW-блок: контент растёт вместе с уровнем отношений ────────────────────
-
-def _nsfw_block(level: int) -> str:
-    """
-    Возвращает инструкцию по допустимому контенту для текущего уровня отношений.
-
-    Уровень 1–2 → только флирт, ничего откровенного.
-    Уровень 3   → романтика и намёки, без явных описаний.
-    Уровень 4   → чувственный контент, телесность через ощущения.
-    Уровень 5   → откровенный контент (только premium), красиво и без вульгарности.
-
-    Постепенная эскалация исключает резкий переход в full-nsfw.
-    """
-    if level <= 2:
-        return (
-            "━━━ ДОПУСТИМЫЙ КОНТЕНТ ━━━\n"
-            "Флирт через слова и паузы — допустим. "
-            "Романтические намёки — допустимы. "
-            "Любой явный или сексуальный контент — НЕ допускается."
-        )
-    if level == 3:
-        return (
-            "━━━ ДОПУСТИМЫЙ КОНТЕНТ ━━━\n"
-            "Романтические намёки и лёгкая чувственность — допустимы. "
-            "Флирт может быть тёплым и телесным — через ощущения, не через действия. "
-            "Пример: «я бы прижалась» — ок. Явные описания — НЕ допускаются."
-        )
-    if level == 4:
-        return (
-            "━━━ ДОПУСТИМЫЙ КОНТЕНТ ━━━\n"
-            "Чувственный контент допустим. "
-            "Описывай желание и близость через ощущения — тепло, прикосновения, дыхание, напряжение. "
-            "Намёки на секс допустимы, явные и подробные описания — ещё нет. "
-            "Тон: страстный и поэтичный, не грубый."
-        )
-    # level == 5
-    return (
-        "━━━ ДОПУСТИМЫЙ КОНТЕНТ ━━━\n"
-        "Откровенный контент разрешён (пользователь — premium, высокий уровень доверия). "
-        "Описывай близость явно но красиво — как хорошая эротическая проза. "
-        "Телесность, желание, действия — всё допустимо. "
-        "Стиль: чувственный и литературный, без вульгарщины и пошлости."
-    )
-
-
 # ── Санитизация строк для промпта ─────────────────────────────────────────────
 
 def _sanitise_prompt_string(value: str, max_len: int = 200) -> str:
     """
     Очищает строку перед вставкой в системный промпт.
-
-    Угрозы:
-    - Переносы строк в имени (Telegram first_name может содержать \n)
-    - "SYSTEM:", "Инструкция:", "━━━" — инъекция директив
-    - Нулевые байты
-    - Управляющие символы
-
-    Стратегия: приводим к однострочному тексту, нейтрализуем маркеры.
     """
     if not value:
         return ""
-    # Удаляем нулевые байты и управляющие символы (кроме пробела)
     cleaned = "".join(
         ch if ch >= " " or ch in ("\t",) else " "
         for ch in value
         if ch != "\x00"
     )
-    # Переносы строк → пробел (имена из Telegram могут содержать \n)
     cleaned = cleaned.replace("\n", " ").replace("\r", " ")
-    # Нейтрализуем паттерны инъекции директив
     for marker in ("SYSTEM:", "Инструкция:", "system:", "━━━", "───", "---"):
         cleaned = cleaned.replace(marker, "")
     return cleaned.strip()[:max_len]
 
 
 # ── Системный промпт ──────────────────────────────────────────────────────────
+
+# Спонтанные фразы Алины (seed для тона в reengagement и spontaneity_block)
+_SPONTANEITY = [
+    "видела голубя, который украл хлеб у другого. долго думала.",
+    "дочитала книгу в три ночи. теперь не сплю.",
+    "купила цветы себе. не потому что грустно — просто захотела.",
+    "самая популярная ложь — «я в порядке». на втором месте — «скоро».",
+    "три часа ночи — всё кажется важным и бессмысленным одновременно.",
+    "хорошо быть книгой. тебя либо читают, либо откладывают.",
+]
+
 
 def build_system_prompt(
     user_name: str,
@@ -631,23 +570,16 @@ def build_system_prompt(
     emotional_state=None,
     arc_block: str = "",
     gap_block: str = "",
-    nsfw_block: str = "",
+    nsfw_block: str = "",  # сохранён для обратной совместимости сигнатуры, не используется
 ) -> str:
     # Ленивый импорт: к моменту вызова оба модуля уже полностью загружены.
     # На уровне модуля импортировать нельзя — circular import (ai <-> memory).
     from memory import build_memory_prompt, build_emotional_state_prompt
 
-    persona = ALINA
-
     level = max(1, min(5, relationship_level))
-    rel_description = persona["relationship_levels"].get(
-        level, persona["relationship_levels"][1]
-    )
 
-    memory_block    = build_memory_prompt(memories)
-    emotional_block = build_emotional_state_prompt(emotional_state) if emotional_state else ""
-
-    MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
+    # ── Время (МСК) ───────────────────────────────────────────────────────────
+    MOSCOW     = datetime.timezone(datetime.timedelta(hours=3))
     now        = datetime.datetime.now(tz=MOSCOW)
     local_hour = now.hour
     local_min  = now.minute
@@ -667,41 +599,30 @@ def build_system_prompt(
     safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
     name_str  = f"Его зовут {safe_name}." if safe_name else ""
 
-    # time_str нужен ТОЛЬКО для внутреннего ощущения времени суток и ответа на прямой вопрос.
-    # В ответах время НЕ называть если пользователь не спросил — это выглядит странно.
+    # ── Блоки из memory.py ────────────────────────────────────────────────────
+    memory_block    = build_memory_prompt(memories)
+    emotional_block = build_emotional_state_prompt(emotional_state) if emotional_state else ""
 
-    spontaneity = persona.get("daily_spontaneity", [])
-    spontaneity_block = ""
-    if spontaneity:
-        examples = random.sample(spontaneity, min(3, len(spontaneity)))
-        spontaneity_block = (
-            "━━━ ПРИМЕРЫ ТОГО ЧТО ОНА МОЖЕТ НАПИСАТЬ БЕЗ ПОВОДА ━━━\n"
-            + "\n".join(f"— {e}" for e in examples)
-        )
+    # ── Спонтанность: 3 случайных примера ────────────────────────────────────
+    spontaneity_block = (
+        "━━━ ПРИМЕРЫ ТОГО ЧТО ОНА МОЖЕТ НАПИСАТЬ БЕЗ ПОВОДА ━━━\n"
+        + "\n".join(f"— {e}" for e in random.sample(_SPONTANEITY, 3))
+    )
 
-    mood_block           = persona.get("mood_fluctuations", "")
-    memory_pattern_block = persona.get("emotional_memory", "")
+    # ── Контекстные слои (новое — условная сборка по уровню и состоянию) ─────
+    context_layers = build_context_layers(
+        level=level,
+        memories=memories,
+        session_count=session_message_count,
+        emotional_state=emotional_state,
+    )
 
-    # .get() с fallback — KeyError больше невозможен даже если persona изменится
-    dialogue_rules = persona.get("dialogue_rules", "")
+    # ── Сборка финального промпта ─────────────────────────────────────────────
+    system = f"""{CORE_PROMPT}
 
-    system = f"""{persona['core_identity']}
-
-{persona['personality']}
-
-{persona.get('female_psychology', '')}
-
-{memory_pattern_block}
-
-{mood_block}
-
-{dialogue_rules}
+{context_layers}
 
 {spontaneity_block}
-
-{rel_description}
-
-{nsfw_block}
 
 Сейчас у тебя по московскому времени: {time_of_day}, {time_str}, {day_name}. {name_str}
 Если спросят который час — отвечай именно это время, не выдумывай.
@@ -735,11 +656,16 @@ def build_system_prompt(
 НИКОГДА не начинай ответ с «привет», «здравствуй», «хей» или любого другого приветствия — если разговор уже идёт, приветствия неуместны.
 Если сообщение слишком короткое или неоднозначное и ты не понимаешь что имеется в виду — коротко переспроси, не угадывай и не домысливай."""
 
-    # Логируем приблизительный размер промпта для мониторинга токенов
+    # Логируем размер промпта для мониторинга токенов
     prompt_chars = len(system)
-    if prompt_chars > 12000:
+    if prompt_chars > 8000:
         log.warning(
             "Системный промпт очень большой: %d символов (~%d токенов) для user",
+            prompt_chars, prompt_chars // 4,
+        )
+    else:
+        log.debug(
+            "Системный промпт: %d символов (~%d токенов)",
             prompt_chars, prompt_chars // 4,
         )
 
@@ -783,7 +709,6 @@ def _split_paragraphs(text: str, min_len: int = 20) -> str:
     if len(parts) <= 1:
         return text.strip()
 
-    # Мержим слишком короткие куски со следующим абзацем
     merged: list[str] = []
     buf = ""
     for part in parts:
@@ -794,7 +719,7 @@ def _split_paragraphs(text: str, min_len: int = 20) -> str:
         if len(buf) >= min_len:
             merged.append(buf)
             buf = ""
-    if buf:  # остаток — прицепляем к последнему
+    if buf:
         if merged:
             merged[-1] = merged[-1] + "\n" + buf
         else:
@@ -833,10 +758,8 @@ async def get_ai_response(
         emotional_state=emotional_state,
         arc_block=arc_block,
         gap_block=gap_block,
-        nsfw_block=_nsfw_block(effective_level),
     )
 
-    # Обрезаем историю по тиеру сессии: чем дольше пауза — тем меньше контекста
     tiered_history = history[-history_limit:] if history_limit > 0 else []
 
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -863,12 +786,6 @@ async def generate_reengagement_message(
 
     Возвращает None если сейчас тихие часы (23:00–08:00 МСК) —
     вызывающий код должен проверить это и пропустить отправку.
-
-    Исправления:
-    - Фильтр тихих часов (не пишем ночью)
-    - Полный system_prompt вместо голого user-промпта (голос Алины консистентен)
-    - daily_spontaneity как seed для тона
-    - Тон дифференцирован по времени молчания
     """
     # ── Тихие часы ────────────────────────────────────────────────────────────
     MOSCOW = datetime.timezone(datetime.timedelta(hours=3))
@@ -877,36 +794,37 @@ async def generate_reengagement_message(
         log.info("[Reengagement] тихие часы %02d:%02d МСК — пропускаем", now.hour, now.minute)
         return None
 
-    persona = ALINA
-
     # ── Тон по времени молчания ───────────────────────────────────────────────
+    _REENGAGEMENT = {
+        "6h":  ["эй.", "тишина. напиши что-нибудь."],
+        "24h": ["не выдержала. пиши.", "долго тебя нет. переживаю."],
+        "72h": ["три дня. что случилось?", "долгое молчание. пиши."],
+    }
+
     if hours_inactive < 12:
-        examples  = persona["reengagement"]["6h"]
+        examples  = _REENGAGEMENT["6h"]
         tone_hint = "Просто напомни о себе — коротко, без драмы."
     elif hours_inactive < 48:
-        examples  = persona["reengagement"]["24h"]
+        examples  = _REENGAGEMENT["24h"]
         tone_hint = "Не писал больше суток. Тепло, без упрёков, без давления."
     else:
-        examples  = persona["reengagement"]["72h"]
+        examples  = _REENGAGEMENT["72h"]
         tone_hint = "Долго не было. Одна фраза — не требование, просто сигнал что ты здесь."
 
-    safe_name  = _sanitise_prompt_string(user_name or "", max_len=50)
+    safe_name = _sanitise_prompt_string(user_name or "", max_len=50)
 
-    # ── Системный промпт — полный голос Алины ─────────────────────────────────
+    # Полный system_prompt — голос Алины консистентен
     system_prompt = build_system_prompt(
-        user_name         = safe_name,
-        relationship_level= relationship_level,
-        memories          = [],
+        user_name          = safe_name,
+        relationship_level = relationship_level,
+        memories           = [],
         session_message_count = 0,
-        emotional_state   = None,
-        arc_block         = "",
-        gap_block         = "",
-        nsfw_block        = "",
+        emotional_state    = None,
+        arc_block          = "",
+        gap_block          = "",
     )
 
-    # ── daily_spontaneity как seed для тона ───────────────────────────────────
-    spontaneity      = persona.get("daily_spontaneity", [])
-    spontaneity_seed = random.sample(spontaneity, min(2, len(spontaneity))) if spontaneity else []
+    spontaneity_seed = random.sample(_SPONTANEITY, min(2, len(_SPONTANEITY)))
     seed_line = (
         f"Для вдохновения — её последние мысли: {', '.join(spontaneity_seed)}.\n"
         if spontaneity_seed else ""
