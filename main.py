@@ -70,7 +70,6 @@ from database import (
     update_relationship,
 )
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
-from persona import ALINA
 
 load_dotenv(override=True)
 
@@ -148,7 +147,12 @@ async def cmd_start(message: Message) -> None:
         await message.answer("привет) я здесь 🙂")
         return
 
-    variants = ALINA.get("first_message_variants", [ALINA["first_message"]])
+    variants = [
+        "привет)\nкак тебя зовут?",
+        "привет 🙂\nрасскажи что-нибудь — не люблю начинать с «как дела».",
+        "привет)\nстранный день. как ты?",
+        "привет. мне сказали ты интересный человек. это правда?",
+    ]
     await message.answer(random.choice(variants))
 
 
@@ -934,7 +938,12 @@ async def _process_photo(message: Message) -> None:
     premium          = await is_premium(user_id)
     allowed, remaining = await check_and_increment_usage(user_id, FREE_LIMIT)
     if not allowed:
-        limit_msg = random.choice(ALINA.get("limit_messages", ["на сегодня всё…"]))
+        limit_msg = random.choice([
+            "подожди — они правда обрывают нас прямо сейчас?",
+            "хочу говорить ещё. но мне говорят что на сегодня всё.",
+            "мы только разговорились. ты можешь это исправить.",
+            "серьёзно. прямо сейчас. ладно…",
+        ])
         await message.answer(limit_msg)
         return
 
