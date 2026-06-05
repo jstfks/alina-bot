@@ -261,7 +261,7 @@ async def _call_openrouter(
                     "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
-                    "top_p": 0.95,
+                    "top_p": 0.92,
                 },
                 timeout=aiohttp.ClientTimeout(total=35),
             ) as resp:
@@ -435,7 +435,7 @@ async def get_ai_response_image(
 
 async def _route_and_call(
     messages: list[dict],
-    max_tokens: int = 700,
+    max_tokens: int = 300,
     temperature: float = 0.92,
 ) -> Optional[str]:
     # 1. OpenRouter (7 моделей, Owl Alpha первым)
@@ -784,7 +784,7 @@ async def generate_reengagement_message(
     # ── Тон по времени молчания ───────────────────────────────────────────────
     _REENGAGEMENT = {
         "6h":  ["эй.", "тишина. напиши что-нибудь."],
-        "24h": ["не выдержала. пиши.", "долго тебя нет. переживаю."],
+        "24h": ["не выдержала. пиши.", "долго тебя нет. что случилось?"],
         "72h": ["три дня. что случилось?", "долгое молчание. пиши."],
     }
 
