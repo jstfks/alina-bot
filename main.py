@@ -1177,10 +1177,12 @@ async def _broadcast_to_all(
     photo_file_id: str | None = None,
     photo_caption: str | None = None,
     videonote_file_id: str | None = None,
+    description: str | None = None,  # что на фото/кружке — для модели
 ) -> tuple[int, int]:
     """
     Рассылает сообщение всем незаблокированным пользователям.
     Поддерживает: текст / фото (с подписью) / кружок.
+    description — описание содержимого медиа для модели (не видно пользователю).
     Сохраняет в историю как role="assistant".
     Возвращает (sent, failed).
     """
@@ -1193,11 +1195,14 @@ async def _broadcast_to_all(
         )
         users = list(result.scalars().all())
 
-    # Что сохраняем в историю как "слова Алины"
+    # Что сохраняем в историю — модель это видит, пользователь нет.
+    # description даёт модели контекст что именно на фото/кружке.
     if photo_file_id:
         history_text = f"[отправила фото]{': ' + photo_caption if photo_caption else ''}"
+        if description:
+            history_text += f" [на фото: {description}]"
     elif videonote_file_id:
-        history_text = "[отправила кружок]"
+        history_text = f"[отправила кружок: {description}]" if description else "[отправила кружок]"
     else:
         history_text = text or ""
 
@@ -1255,31 +1260,75 @@ async def cmd_broadcast(message: Message) -> None:
 
 @dp.message(F.photo, F.from_user.func(lambda u: u.id == ADMIN_ID))
 async def cmd_broadcast_photo(message: Message) -> None:
-    """Фото с подписью /broadcast [текст] → рассылка фото."""
+    """
+    Фото с подписью /broadcast [подпись пользователю] | [описание для модели]
+    Символ | разделяет: левая часть — подпись под фото, правая — описание для модели.
+    Примеры:
+      /broadcast                          → фото без подписи, модель знает факт отправки
+      /broadcast скучала по тебе          → подпись пользователю, без описания
+      /broadcast | улыбаюсь, волосы распущены, дома   → нет подписи, только описание модели
+      /broadcast скучала | улыбаюсь, дома → подпись + описание
+    """
     caption = message.caption or ""
     if not caption.startswith("/broadcast"):
-        return  # обычное фото от админа — не рассылка
+        return
 
-    photo_caption = caption.removeprefix("/broadcast").strip() or None
-    file_id = message.photo[-1].file_id  # берём наибольшее разрешение
+    rest = caption.removeprefix("/broadcast").strip()
 
-    await message.answer(f"Рассылка фото начата…{chr(10) + photo_caption if photo_caption else ''}")
+    # Парсим разделитель |
+    if "|" in rest:
+        parts = rest.split("|", 1)
+        photo_caption = parts[0].strip() or None
+        description   = parts[1].strip() or None
+    else:
+        photo_caption = rest or None
+        description   = None
+
+    file_id = message.photo[-1].file_id
+
+    preview = photo_caption or "—"
+    desc_preview = description or "—"
+    await message.answer(
+        f"Рассылка фото начата…\n"
+        f"Подпись пользователю: {preview}\n"
+        f"Описание для модели: {desc_preview}"
+    )
     sent, failed = await _broadcast_to_all(
         photo_file_id=file_id,
         photo_caption=photo_caption,
+        description=description,
     )
     await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
 
 
 @dp.message(F.video_note, F.from_user.func(lambda u: u.id == ADMIN_ID))
 async def cmd_broadcast_videonote(message: Message) -> None:
-    """Кружок с подписью /broadcast → рассылка кружка."""
-    # У кружков нет caption в Telegram — используем reply на сообщение /broadcast
-    # ИЛИ просто любой кружок от админа считается рассылкой (проще для использования)
+    """
+    Кружок. Описание для модели передаётся реплаем на сообщение с текстом.
+    Отправь текст-описание, потом сделай reply кружком на него.
+    Если reply нет — модель знает только факт отправки кружка.
+
+    Пример:
+      1. Пишешь боту: "улыбаюсь, за окном дождь, дома"
+      2. Делаешь reply кружком на это сообщение
+      → модель получит: [отправила кружок: улыбаюсь, за окном дождь, дома]
+    """
+    # Берём описание из reply-сообщения если есть
+    description = None
+    if message.reply_to_message and message.reply_to_message.text:
+        description = message.reply_to_message.text.strip()[:200]
+
     file_id = message.video_note.file_id
 
-    await message.answer("Рассылка кружка начата…")
-    sent, failed = await _broadcast_to_all(videonote_file_id=file_id)
+    desc_preview = description or "—"
+    await message.answer(
+        f"Рассылка кружка начата…\n"
+        f"Описание для модели: {desc_preview}"
+    )
+    sent, failed = await _broadcast_to_all(
+        videonote_file_id=file_id,
+        description=description,
+    )
     await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
 
 
