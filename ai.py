@@ -45,10 +45,11 @@ GROQ_MODEL     = "moonshotai/kimi-k2-instruct"
 
 OPENROUTER_FALLBACK_MODELS = [
     "openrouter/owl-alpha",                          # приоритет — stealth frontier
+    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",                          # тест nsfw
+    "google/gemini-2.0-flash-001",                   # пока приоритет 2 
+    "anthropic/claude-3.7-sonnet",                   # пока приоритет 3
     "nousresearch/hermes-3-llama-3.1-405b:free",     # 405B, отлично держит персонажей + nsfw
     "z-ai/glm-4.5-air:free",                         # GLM 4.5 Air — сильный на русском
-    "stepfun/step-3.5-flash:free",                   # Step Flash — быстрый
-    "tngtech/deepseek-r1t2-chimera:free",            # 671B MoE, генерирует <think> — стрипаем
     "openai/gpt-oss-120b:free",                      # 117B MoE, сильный но с content filters
     "google/gemma-4-26b-a4b-it:free",                # Gemma 4 26B MoE — резерв
 ]
