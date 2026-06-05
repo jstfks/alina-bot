@@ -90,7 +90,7 @@ def _require_env(name: str) -> str:
 
 
 BOT_TOKEN      = _require_env("BOT_TOKEN")
-FREE_LIMIT     = 40
+FREE_LIMIT     = 30
 YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "").strip().strip('"').strip("'")
 STRIPE_TOKEN   = os.getenv("STRIPE_TOKEN", "").strip().strip('"').strip("'")
 STARS_TOKEN    = ""  # Telegram Stars — токен провайдера не нужен
