@@ -1341,9 +1341,10 @@ async def main() -> None:
         job_defaults={"misfire_grace_time": 600, "max_instances": 1}
     )
     scheduler.add_job(
-        lambda: asyncio.ensure_future(check_inactive_users(scheduler)),
+        check_inactive_users,
         "interval",
         hours=1,
+        args=[scheduler],
     )
     scheduler.start()
     log.info("Планировщик запущен")
