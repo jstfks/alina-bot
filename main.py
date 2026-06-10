@@ -121,7 +121,7 @@ _STICKER_LINKS = (
 
 def _is_sticker_request(text: str) -> bool:
     t = text.lower()
-    has_sticker = any(w in t for w in ("стикер", "sticker", "пак", "pack"))
+    has_sticker = any(w in t for w in ("стикер", "стикеры", "sticker", "stickers", "пак", "pack"))
     has_sexual  = any(w in t for w in ("секс", "порно", "porno", "porn", "эротик", "nsfw", "18+", "xxx"))
     return has_sticker and has_sexual
 
