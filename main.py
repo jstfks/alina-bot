@@ -90,7 +90,7 @@ def _require_env(name: str) -> str:
 
 
 BOT_TOKEN      = _require_env("BOT_TOKEN")
-FREE_LIMIT     = 30
+FREE_LIMIT     = 20
 YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "").strip().strip('"').strip("'")
 STRIPE_TOKEN   = os.getenv("STRIPE_TOKEN", "").strip().strip('"').strip("'")
 STARS_TOKEN    = ""  # Telegram Stars — токен провайдера не нужен
@@ -109,6 +109,21 @@ dp  = Dispatcher(storage=MemoryStorage())
 # - состояние гонки при update_relationship
 # - дублирование в истории
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+# ── Sticker requests ──────────────────────────────────────────────────────────
+_sticker_warned_users: set[int] = set()
+
+_STICKER_LINKS = (
+    "https://t.me/addstickers/MySextingPack\n"
+    "https://t.me/addstickers/sextingpack_v2\n"
+    "https://t.me/addstickers/animesexting"
+)
+
+def _is_sticker_request(text: str) -> bool:
+    t = text.lower()
+    has_sticker = any(w in t for w in ("стикер", "sticker", "пак", "pack"))
+    has_sexual  = any(w in t for w in ("секс", "порно", "porno", "porn", "эротик", "nsfw", "18+", "xxx"))
+    return has_sticker and has_sexual
 
 
 def _now_utc() -> datetime:
@@ -750,6 +765,22 @@ async def handle_message(message: Message) -> None:
 
     if len(user_text) > 4000:
         await message.answer("сообщение слишком длинное… напиши покороче?")
+        return
+
+    # ── Перехват запросов порно/секс-стикеров ────────────────────────────────
+    if _is_sticker_request(user_text):
+        if user_id in _sticker_warned_users:
+            await message.answer(
+                f"окей, держи. и больше не надо с этим ко мне, ладно?\n\n{_STICKER_LINKS}"
+            )
+        else:
+            _sticker_warned_users.add(user_id)
+            await message.answer(
+                "подожди. зачем тебе это?\n"
+                "я — не про порно и не про стикеры. "
+                "если хочется поговорить — я здесь. "
+                "если нет — ок."
+            )
         return
 
     # Per-user lock: если предыдущее сообщение ещё обрабатывается — ждём.
