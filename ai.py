@@ -543,7 +543,6 @@ def build_system_prompt(
     emotional_state=None,
     arc_block: str = "",
     gap_block: str = "",
-    nsfw_block: str = "",  # сохранён для обратной совместимости сигнатуры, не используется
 ) -> str:
     # Ленивый импорт: к моменту вызова оба модуля уже полностью загружены.
     # На уровне модуля импортировать нельзя — circular import (ai <-> memory).
