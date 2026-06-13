@@ -8,6 +8,6 @@ persona/ — Пакет персонажа Алины.
 """
 
 from persona.core import CORE_PROMPT
-from persona.layers import build_context_layers, get_nsfw_block
+from persona.layers import build_context_layers
 
-__all__ = ["CORE_PROMPT", "build_context_layers", "get_nsfw_block"]
+__all__ = ["CORE_PROMPT", "build_context_layers"]

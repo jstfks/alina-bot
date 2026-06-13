@@ -10,7 +10,7 @@ persona/layers.py — Оркестратор контекстных слоёв.
   memory_style  → только если memories непустые (~150 токенов)
   moods         → только если session_count >= 5 или emotional_state задан (~200 токенов)
   scenarios     → только если level >= 3 (~300 токенов)
-  nsfw          → только если level >= 4 (~100–150 токенов)
+  nsfw          → всегда, но тон зависит от уровня (1-2 ограничение, 3-4-5 разрешение) (~100–150 токенов)
 
 Итог по токенам:
   Уровень 1, новый пользователь: ~850–900 токенов  (было ~2800)
@@ -110,7 +110,3 @@ def build_context_layers(
 
     return "\n\n".join(parts)
 
-
-def get_nsfw_block(level: int) -> str:
-    """Отдельный геттер для обратной совместимости с ai.py."""
-    return _NSFW_BLOCKS.get(level, _NSFW_BLOCKS[1])
