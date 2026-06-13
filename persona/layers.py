@@ -20,7 +20,6 @@ persona/layers.py — Оркестратор контекстных слоёв.
 
 from __future__ import annotations
 
-from persona.core import CORE_PROMPT
 from persona.content.relationship import get_relationship_layer
 from persona.content.memory_style import MEMORY_STYLE
 from persona.content.moods import get_mood_layer
