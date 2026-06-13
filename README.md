@@ -1,60 +1,95 @@
-# Alina Bot — Deploy Guide
+# Alina Bot — Telegram AI companion
 
-## Быстрый старт на Railway
+Алина — Telegram-бот с характером: начитанная, остроумная, с чувством юмора и своими границами. Использует каскад AI-провайдеров (OpenRouter → Gemini → DeepSeek) для генерации ответов, адаптированных под уровень отношений с пользователем.
 
-### 1. Подготовка GitHub репозитория
-
-1. Создай новый репозиторий на github.com
-2. Загрузи все файлы этого проекта
-3. Убедись что `.env` НЕ попал в репозиторий (он в .gitignore)
-
-### 2. Деплой на Railway
-
-1. Зайди на railway.app
-2. New Project → Deploy from GitHub repo
-3. Выбери свой репозиторий
-4. Railway автоматически определит Python проект
-
-### 3. База данных
-
-1. В Railway проекте: New → Database → PostgreSQL
-2. Нажми на базу данных → Variables
-3. Скопируй `DATABASE_URL`
-
-### 4. Переменные окружения
-
-В Railway → твой сервис → Variables добавь:
+## Архитектура
 
 ```
-BOT_TOKEN=         (от @BotFather)
-DEEPSEEK_API_KEY=  (от platform.deepseek.com)
-DATABASE_URL=      (от Railway PostgreSQL)
+main.py            — точка входа, хендлеры Telegram, оплата, broadcast
+ai.py              — генерация ответов, цепочка провайдеров, системный промпт
+database.py        — SQLAlchemy ORM, UPSERT-операции, дневные лимиты
+memory.py          — извлечение фактов/эмоций, построение блоков промпта
+http_client.py     — единая aiohttp-сессия (разрыв circular import)
+persona/           — пакет персонажа
+├── core.py        — ядро личности (всегда в промпте)
+├── layers.py      — контекстные слои (mood, scenario, nsfw — по условию)
+└── __init__.py    — публичный API: CORE_PROMPT, build_context_layers
 ```
 
-### 5. Деплой
+## Система отношений (5 уровней)
 
-Railway автоматически задеплоит после добавления переменных.
-Смотри логи в разделе Deployments.
+| Уровень | Описание |
+|---------|----------|
+| 1 | Знакомство, формально-вежливо |
+| 2 | Лёгкость, короткие ответы |
+| 3 | Доверие, флирт, спонтанность |
+| 4 | Близость, телесность, разговоры по душам |
+| 5 | Полная открытость, секстинг |
 
-## Проверка
+Прогресс замедляется с каждым уровнем. На 5-м уровне требуется ~500+ сообщений для роста на 1 единицу.
 
-Напиши своему боту `/start` в Telegram.
-Алина должна ответить: "привет) как тебя зовут?"
+## Цепочка AI-провайдеров
 
-## Структура файлов
+1. **OpenRouter** — 7 моделей (primary). Падает — переключается на следующую.
+2. **Gemini** — fallback, через `google-genai`.
+3. **DeepSeek** — последний fallback.
 
+Все провайдеры упали → случайная фраза из `FALLBACK_RESPONSES`.
+
+## Дневные лимиты
+
+- **Free**: 20 сообщений/день, история — 30 сообщений, коэффициент спада: 3.0
+- **Premium**: безлимит, история — 60 сообщений, спад: 1.5
+
+Превышение лимита → paywall с предложением купить подписку.
+
+## Быстрый старт
+
+```bash
+# Установка
+pip install -r requirements.txt
+
+# Настройка (переменные окружения)
+BOT_TOKEN=...
+OPENROUTER_API_KEY=...
+GEMINI_API_KEY=...
+DEEPSEEK_API_KEY=...
+DATABASE_URL=postgresql+asyncpg://...
+ADMIN_ID=...
+
+# Запуск
+python main.py
 ```
-main.py       — точка входа, хендлеры Telegram
-ai.py         — генерация ответов через DeepSeek
-memory.py     — извлечение и инжект памяти
-database.py   — все операции с БД
-persona.py    — характер и настройки Алины
-railway.toml  — конфиг деплоя
-requirements.txt
+
+Или через Railway — `railway.toml` прилагается:
+
+```toml
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python main.py"
+restartPolicyType = "always"
 ```
 
-## Лимиты
+## Переменные окружения
 
-- Бесплатные пользователи: 20 сообщений/день
-- Premium: безлимит
-- Оплата через Telegram Stars (/pay_week, /pay_month)
+| Переменная | Обязательная | Описание |
+|------------|-------------|----------|
+| `BOT_TOKEN` | Да | Telegram Bot API токен |
+| `OPENROUTER_API_KEY` | Да | OpenRouter API ключ |
+| `GEMINI_API_KEY` | Нет | Gemini API ключ (fallback) |
+| `DEEPSEEK_API_KEY` | Нет | DeepSeek API ключ (fallback) |
+| `DATABASE_URL` | Да | PostgreSQL DSN (`postgresql+asyncpg://...`) |
+| `ADMIN_ID` | Да | Telegram ID администратора |
+| `PAYMENT_PROVIDER_TOKEN` | Да | Telegram Payments токен |
+
+## Требования
+
+- Python ≥ 3.10 (файл `.python-version`: 3.12)
+- PostgreSQL
+- Telegram Bot Token (через [@BotFather](https://t.me/BotFather))
+
+## Deploy (Railway)
+
+Автоматический деплой через Nixpacks. Secrets настраиваются через Railway Variables — `.env` не используется.

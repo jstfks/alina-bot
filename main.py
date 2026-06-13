@@ -1,5 +1,5 @@
 ﻿"""
-main.py — Точка входа Telegram-бота Алина. v4.
+main.py — Точка входа Telegram-бота Алина. v4. FREE_LIMIT=20.
 
 Четвёртый аудит — исправленные проблемы:
 - _process_photo: message_count_today был жёстко зашит в 0.
@@ -394,17 +394,6 @@ def _payment_method_keyboard(tariff: str) -> InlineKeyboardMarkup:
         )])
     rows.append([InlineKeyboardButton(text="↩️ Выбрать другой тариф", callback_data="back_to_plans")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _confirm_keyboard(plan_key: str, label: str) -> InlineKeyboardMarkup:
-    """Клавиатура подтверждения — используется в /premium флоу (Stars/карта)."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"💳 Оплатить: {label}",
-            callback_data=f"pay_{plan_key}",
-        )],
-        [InlineKeyboardButton(text="↩️ Выбрать другой тариф", callback_data="back_to_plans")],
-    ])
 
 
 async def _send_rub_invoice_light_24h(chat_id: int) -> None:

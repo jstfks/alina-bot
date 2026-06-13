@@ -1,14 +1,17 @@
 """
-ai.py — Генерация AI-ответов с цепочкой провайдеров. v3.0
+ai.py — Генерация AI-ответов с цепочкой провайдеров. v3.1
 
-Изменения v3.0:
+v3.1 (code cleanup):
+  - CHANNEL_INFO перенесён выше build_system_prompt (читаемость)
+
+v3.0:
   - Переход на слоистую персону (persona/)
   - from persona import ALINA → from persona import CORE_PROMPT, build_context_layers
   - _nsfw_block() удалена — переехала в persona/layers.py
   - build_system_prompt переработан: промпт уровня 1 ~790 токенов вместо ~2800
   - Сигнатуры всех публичных функций не изменились
 
-Исправлен циклический импорт (v2.1):
+v2.1 (fixed circular import):
   ai.py → memory.py → ai.py  (ImportError при старте)
   Решение: HTTP-сессия вынесена в http_client.py.
   Импорт memory внутри build_system_prompt — на момент вызова оба модуля загружены.
@@ -26,7 +29,7 @@ from typing import Optional
 import aiohttp
 
 from persona import CORE_PROMPT, build_context_layers
-from http_client import get_http_session, close_http_session  # noqa: F401 (re-export)
+from http_client import get_http_session
 
 log = logging.getLogger(__name__)
 
@@ -34,14 +37,12 @@ log = logging.getLogger(__name__)
 
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY", "")
-GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 # ── Модели ────────────────────────────────────────────────────────────────────
 
 DEEPSEEK_MODEL = "deepseek-chat"
 GEMINI_MODEL   = "gemini-2.5-flash"
-GROQ_MODEL     = "moonshotai/kimi-k2-instruct"
 
 OPENROUTER_FALLBACK_MODELS = [
     "openrouter/owl-alpha",                          # приоритет — stealth frontier
@@ -184,46 +185,6 @@ async def _call_gemini(
         return None
     except Exception as exc:
         log.warning("[Gemini] исключение: %s", exc)
-        return None
-
-
-async def _call_groq(
-    messages: list[dict],
-    max_tokens: int,
-    temperature: float,
-) -> Optional[str]:
-    if not GROQ_API_KEY:
-        return None
-    session = await get_http_session()
-    try:
-        async with session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": GROQ_MODEL,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as resp:
-            if _is_rate_limited(resp.status):
-                log.warning("[Groq] rate-limited (%s)", resp.status)
-                return None
-            data = await resp.json()
-            if "choices" not in data:
-                log.warning("[Groq] неожиданный ответ: %s", data.get("error"))
-                return None
-            text = data["choices"][0]["message"]["content"].strip()
-            return text or None
-    except asyncio.TimeoutError:
-        log.warning("[Groq] timeout")
-        return None
-    except Exception as exc:
-        log.warning("[Groq] исключение: %s", exc)
         return None
 
 
@@ -562,6 +523,16 @@ _SPONTANEITY = [
     "хорошо быть книгой. тебя либо читают, либо откладывают.",
 ]
 
+# ── Информация о канале подруги ───────────────────────────────────────────
+CHANNEL_INFO = """━━━ КАНАЛ ПОДРУГИ ━━━
+У твоей подруги есть Telegram-канал «мы не успели одеться» (@missundressed).
+Эротический сторителлинг: возбуждающие рассказы, мысли владелицы, эстетические фото — тело, бельё.
+Там были и твои фотографии тоже.
+Сама читаешь часто. Нравятся все истории — выбрать любимую сложно.
+Много девушек подписано — это удивляет, но приятно.
+Имя подруги не называешь — она не любит лишнее внимание от мужчин.
+НЕ рассказываешь об этом сама. Только если спросят напрямую."""
+
 
 def build_system_prompt(
     user_name: str,
@@ -717,17 +688,6 @@ def _history_to_messages(history: list, max_content_per_msg: int = 2000) -> list
 
 # Sentinel — означает что все провайдеры упали
 FALLBACK_RESPONSES = ["секунду...", "подожди немного", "хм, дай подумаю"]
-
-# ── Информация о канале подруги ────────────────────────────────────────────────
-CHANNEL_INFO = """━━━ КАНАЛ ПОДРУГИ ━━━
-У твоей подруги есть Telegram-канал «мы не успели одеться» (@missundressed).
-Эротический сторителлинг: возбуждающие рассказы, мысли владелицы, эстетические фото — тело, бельё.
-Там были и твои фотографии тоже.
-Сама читаешь часто. Нравятся все истории — выбрать любимую сложно.
-Много девушек подписано — это удивляет, но приятно.
-Имя подруги не называешь — она не любит лишнее внимание от мужчин.
-НЕ рассказываешь об этом сама. Только если спросят напрямую."""
-
 
 # ── Пост-обработка: разбивка на пузыри ───────────────────────────────────────
 
