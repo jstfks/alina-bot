@@ -29,6 +29,7 @@ from typing import Optional
 import aiohttp
 
 from persona import CORE_PROMPT, build_context_layers
+from persona.content.moods import MOOD_PHRASES
 from http_client import get_http_session
 
 log = logging.getLogger(__name__)
@@ -576,9 +577,17 @@ def build_system_prompt(
     emotional_block = build_emotional_state_prompt(emotional_state) if emotional_state else ""
 
     # ── Спонтанность: 3 случайных примера ────────────────────────────────────
+    if emotional_state and emotional_state.mood_after_last_session in MOOD_PHRASES:
+        pool = MOOD_PHRASES[emotional_state.mood_after_last_session]
+        if pool and len(pool) >= 3:
+            examples = random.sample(pool, 3)
+        else:
+            examples = random.sample(_SPONTANEITY, 3)
+    else:
+        examples = random.sample(_SPONTANEITY, 3)
     spontaneity_block = (
         "━━━ ПРИМЕРЫ ТОГО ЧТО ОНА МОЖЕТ НАПИСАТЬ БЕЗ ПОВОДА ━━━\n"
-        + "\n".join(f"— {e}" for e in random.sample(_SPONTANEITY, 3))
+        + "\n".join(f"— {e}" for e in examples)
     )
 
     # ── Контекстные слои (новое — условная сборка по уровню и состоянию) ─────
