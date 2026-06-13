@@ -182,8 +182,6 @@ async def cmd_menu(message: Message) -> None:
         "/help — помощь"
     )
 
-
-
 # ── /help — интерактивное меню помощи ────────────────────────────────────────
 
 _HELP_TEXT_MAIN = (
@@ -295,8 +293,6 @@ async def cb_help_sub(cb: CallbackQuery) -> None:
     await cb.answer()
 
 # ── /premium и клавиатура оплаты ──────────────────────────────────────────────
-
-
 
 # ── Вспомогательные функции для invoice ──────────────────────────────────────
 
@@ -568,8 +564,6 @@ async def cb_back_to_plans(cb: CallbackQuery) -> None:
     except Exception:
         pass
     await cb.answer()
-
-
 
 # ── Legacy /pay_* команды (обратная совместимость) ────────────────────────────
 
