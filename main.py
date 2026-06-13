@@ -1,25 +1,18 @@
 ﻿"""
-main.py — Точка входа Telegram-бота Алина. v3.
+main.py — Точка входа Telegram-бота Алина. v4.
 
-Третий аудит — исправленные проблемы:
-- message_count_today для premium больше не всегда 0. Раньше считался
-  как FREE_LIMIT - remaining, а для premium remaining = FREE_LIMIT,
-  что давало 0 на любом сообщении и ломало build_session_arc /
-  build_context_layers (premium застревал в "ранней стадии" сессии).
-  Теперь msgs_used считается единообразно: для free/pack — из
-  check_and_increment_usage(effective_limit), для premium — через
-  виртуальный счётчик check_and_increment_usage(user_id, 10**9)
-  без блокировки.
-- handle_photo (F.photo) перехватывал ВСЕ фото от админа раньше, чем
-  cmd_broadcast_photo успевал сработать — рассылка фото была мёртвым
-  кодом. Теперь handle_photo проверяет ADMIN_ID + caption.startswith
-  ("/broadcast") и делегирует в cmd_broadcast_photo напрямую; дублирующий
-  недостижимый декоратор у cmd_broadcast_photo удалён.
-- _process_photo игнорировал is_premium и pack_bonus при проверке
-  дневного лимита (всегда check_and_increment_usage(user_id, FREE_LIMIT)).
-  Premium/pack-пользователи могли получить отказ по фото при исчерпанном
-  текстовом лимите. Теперь лимит для фото пропускается для premium и
-  расширяется pack_bonus как у текстовых сообщений.
+Четвёртый аудит — исправленные проблемы:
+- _process_photo: message_count_today был жёстко зашит в 0.
+  Premium получал 0 всегда (ломал build_session_arc / build_context_layers —
+  сессия застревала в "ранней стадии"), free — не отражал реального числа
+  сообщений за сегодня. Исправлено: premium инкрементирует виртуальный
+  счётчик (check_and_increment_usage(user_id, 10**9)), free — использует
+  check_and_increment_usage(effective_limit) с захватом remaining.
+- _process_photo: remaining отбрасывался (check_and_increment_usage
+  возвращал allowed, _). msgs_used не вычислялся.
+- ADMIN_ID и broadcast-функции (cmd_broadcast, cmd_broadcast_photo,
+  cmd_broadcast_videonote) были определены после handle_photo —
+  forward reference, рабочий, но нечитаемый. Перенесены выше.
 """
 
 from __future__ import annotations
@@ -961,259 +954,6 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
         _create_background_task(extract_emotional_state(user_id, convo_dicts))
 
 
-# ── Обработчик фотографий ─────────────────────────────────────────────────────
-
-@dp.message(F.photo)
-async def handle_photo(message: Message) -> None:
-    # Админский /broadcast с фото обрабатывается отдельно (рассылка),
-    # а не как обычное сообщение боту. Раньше этот хендлер был
-    # зарегистрирован раньше cmd_broadcast_photo и перехватывал ВСЕ
-    # фото от админа, из-за чего рассылка фото была мёртвым кодом.
-    if (
-        message.from_user.id == ADMIN_ID
-        and (message.caption or "").startswith("/broadcast")
-    ):
-        await cmd_broadcast_photo(message)
-        return
-
-    user_id = message.from_user.id
-    lock    = _user_locks[user_id]
-    async with lock:
-        await _process_photo(message)
-
-
-async def _process_photo(message: Message) -> None:
-    user_id = message.from_user.id
-
-    # ── Лимиты (те же что у текстовых сообщений) ─────────────────────────────
-    premium = await is_premium(user_id)
-    if not premium:
-        pack_bonus      = await get_active_pack_bonus(user_id)
-        effective_limit = FREE_LIMIT + pack_bonus
-        allowed, _ = await check_and_increment_usage(user_id, effective_limit)
-        if not allowed:
-            limit_msg = random.choice([
-                "подожди — они правда обрывают нас прямо сейчас?",
-                "хочу говорить ещё. но мне говорят что на сегодня всё.",
-                "мы только разговорились. ты можешь это исправить.",
-                "серьёзно. прямо сейчас. ладно…",
-            ])
-            await message.answer(limit_msg)
-            return
-
-    # ── Typing loop ───────────────────────────────────────────────────────────
-    stop_typing = asyncio.Event()
-    _create_background_task(_typing_loop(message.chat.id, stop_typing))
-
-    try:
-        # ── Скачиваем фото (берём наибольший размер) ──────────────────────────
-        photo   = message.photo[-1]
-        file    = await bot.get_file(photo.file_id)
-        content = await bot.download_file(file.file_path)
-        import base64
-        image_b64 = base64.b64encode(content.read()).decode("utf-8")
-        mime_type = "image/jpeg"
-
-        # ── Контекст пользователя ─────────────────────────────────────────────
-        upersona  = await get_or_create_persona(user_id)
-        memories  = await get_memories(user_id)
-        user_name = next((m.value for m in memories if m.key == "name"), None)
-        if not user_name:
-            user   = await get_or_create_user(user_id)
-            user_name = user.user_name_given or message.from_user.first_name or ""
-
-        emotional_state = await get_emotional_state(user_id)
-        caption = message.caption or ""
-
-        # ── История для контекста (основная модель будет отвечать с историей) ──
-        history_before = await get_history(user_id, limit=30)
-
-        # ── Время с последнего сообщения ─────────────────────────────────────
-        hours_since_last: float = 0.0
-        if upersona.last_interaction:
-            last_ts = upersona.last_interaction
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=timezone.utc)
-            hours_since_last = (_now_utc() - last_ts).total_seconds() / 3600
-
-        # ── Сохраняем факт отправки фото в историю ───────────────────────────
-        await save_message(user_id, "user", f"[фото]{': ' + caption if caption else ''}")
-
-        # ── AI-ответ (двухэтапный pipeline: vision describe → main model) ────
-        try:
-            response, is_fallback = await asyncio.wait_for(
-                get_ai_response_image(
-                    user_id=user_id,
-                    image_b64=image_b64,
-                    mime_type=mime_type,
-                    caption=caption,
-                    user_name=user_name,
-                    relationship_level=upersona.relationship_level,
-                    memories=memories,
-                    history=history_before,
-                    is_premium=premium,
-                    emotional_state=emotional_state,
-                    hours_since_last=hours_since_last,
-                    message_count_today=0,
-                ),
-                timeout=90,  # двухэтапный pipeline — чуть больше времени
-            )
-        except asyncio.TimeoutError:
-            stop_typing.set()
-            log.error("[process_photo] таймаут 75с для user=%s", user_id)
-            await message.answer("что-то не могу открыть… попробуй ещё раз?")
-            return
-        finally:
-            stop_typing.set()
-
-        if not is_fallback:
-            await save_message(user_id, "assistant", response.replace("[SPLIT]", " "))
-        await _send_response(message, response)
-
-    except Exception as exc:
-        stop_typing.set()
-        log.error("[process_photo] исключение для user=%s: %s", user_id, exc)
-        await message.answer("что-то не так с фото… попробуй текстом?")
-
-
-# ── Отправка ответа ───────────────────────────────────────────────────────────
-
-_TELEGRAM_MAX_LENGTH = 4000
-
-
-async def _send_response(message: Message, response: str) -> None:
-    if "[SPLIT]" in response:
-        parts = [p.strip() for p in response.split("[SPLIT]") if p.strip()]
-    else:
-        parts = [response.strip()]
-
-    for i, part in enumerate(parts):
-        if not part:
-            continue
-        if len(part) > _TELEGRAM_MAX_LENGTH:
-            part = part[:_TELEGRAM_MAX_LENGTH]
-        if i > 0:
-            await asyncio.sleep(random.uniform(0.8, 1.8))
-            await bot.send_chat_action(message.chat.id, "typing")
-            await asyncio.sleep(random.uniform(0.5, 1.2))
-        try:
-            await message.answer(part)
-        except TelegramForbiddenError:
-            log.warning("Пользователь %s заблокировал бота", message.from_user.id)
-            await mark_user_blocked(message.from_user.id)
-            break
-        except Exception as exc:
-            log.error("Ошибка отправки для user=%s: %s", message.from_user.id, exc)
-            break
-
-
-# ── Планировщик реактивации ───────────────────────────────────────────────────
-
-# Семафор ограничивает количество одновременных AI-вызовов в scheduler
-_REENGAGEMENT_SEMAPHORE = asyncio.Semaphore(5)
-
-
-async def _send_reengagement(user_id: int, first_name: str, user_name_given: str,
-                              hours_inactive: int, relationship_level: int) -> None:
-    """
-    Фактическая отправка reengagement-сообщения.
-    Вызывается планировщиком с задержкой — не напрямую из check_inactive_users.
-
-    generate_reengagement_message возвращает None в тихие часы (23:00–08:00 МСК).
-    В этом случае просто пропускаем — следующий запуск scheduler попробует снова.
-    """
-    async with _REENGAGEMENT_SEMAPHORE:
-        try:
-            await update_hours_since_message(user_id, float(hours_inactive))
-            msg = await generate_reengagement_message(
-                user_name          = user_name_given or first_name or "",
-                hours_inactive     = hours_inactive,
-                last_summary       = "",
-                relationship_level = relationship_level,
-            )
-            if msg is None:
-                log.info("Reengagement user=%s пропущен — тихие часы МСК", user_id)
-                return
-            await bot.send_message(user_id, msg)
-            log.info("Reengagement → user=%s (%dh)", user_id, hours_inactive)
-        except TelegramForbiddenError:
-            log.info("user=%s заблокировал бота — помечаем", user_id)
-            await mark_user_blocked(user_id)
-        except Exception as exc:
-            log.error("Reengagement ошибка user=%s: %s", user_id, exc)
-
-
-async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
-    """
-    Запускается каждый час. Находит кандидатов и планирует отправку
-    с случайной задержкой 0–120 минут — сообщение не приходит ровно
-    в :00, Алина пишет как живой человек.
-
-    Частота reengagement:
-      Premium → 6, 24, 48, 72 часа
-      Free    → 24, 72 часа
-    """
-    from sqlalchemy import select as sa_select
-    from database import User, UserPersona
-
-    now = _now_utc()
-
-    PREMIUM_HOURS = {6, 24, 48, 72}
-    FREE_HOURS    = {24, 72}
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            sa_select(User, UserPersona)
-            .join(UserPersona, UserPersona.user_id == User.id)
-            .where(
-                User.last_active < now - timedelta(hours=6),
-                User.last_active > now - timedelta(hours=73),
-                UserPersona.is_active == True,
-                User.is_blocked == False,
-            )
-        )
-        rows = list(result.all())
-
-    log.info("Reengagement: проверяем %d кандидатов", len(rows))
-
-    for user, persona in rows:
-        last_active = user.last_active
-        if last_active.tzinfo is None:
-            last_active = last_active.replace(tzinfo=timezone.utc)
-        hours_inactive = int((now - last_active).total_seconds() / 3600)
-
-        user_is_premium = await is_premium(user.id)
-        target_hours = PREMIUM_HOURS if user_is_premium else FREE_HOURS
-
-        if hours_inactive not in target_hours:
-            continue
-
-        # Случайная задержка 0–120 минут — Алина пишет не ровно в :00
-        delay_minutes = random.randint(0, 120)
-        run_at = now + timedelta(minutes=delay_minutes)
-
-        scheduler.add_job(
-            _send_reengagement,
-            trigger="date",
-            run_date=run_at,
-            args=[
-                user.id,
-                user.first_name or "",
-                user.user_name_given or "",
-                hours_inactive,
-                persona.relationship_level,
-            ],
-            misfire_grace_time=600,
-            id=f"reeng_{user.id}_{hours_inactive}",
-            replace_existing=True,  # не дублируем если уже запланировано
-        )
-        log.info(
-            "Reengagement запланирован: user=%s (%dh) через %d мин (~%s UTC)",
-            user.id, hours_inactive, delay_minutes,
-            run_at.strftime("%H:%M"),
-        )
-
-
 # ── Broadcast ────────────────────────────────────────────────────────────────
 #
 # /broadcast <текст> — рассылает сообщение всем пользователям.
@@ -1383,6 +1123,263 @@ async def cmd_broadcast_videonote(message: Message) -> None:
         description=description,
     )
     await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
+
+
+# ── Обработчик фотографий ─────────────────────────────────────────────────────
+
+@dp.message(F.photo)
+async def handle_photo(message: Message) -> None:
+    # Админский /broadcast с фото обрабатывается отдельно (рассылка),
+    # а не как обычное сообщение боту. Раньше этот хендлер был
+    # зарегистрирован раньше cmd_broadcast_photo и перехватывал ВСЕ
+    # фото от админа, из-за чего рассылка фото была мёртвым кодом.
+    if (
+        message.from_user.id == ADMIN_ID
+        and (message.caption or "").startswith("/broadcast")
+    ):
+        await cmd_broadcast_photo(message)
+        return
+
+    user_id = message.from_user.id
+    lock    = _user_locks[user_id]
+    async with lock:
+        await _process_photo(message)
+
+
+async def _process_photo(message: Message) -> None:
+    user_id = message.from_user.id
+
+    # ── Лимиты (те же что у текстовых сообщений) ─────────────────────────────
+    premium = await is_premium(user_id)
+    if not premium:
+        pack_bonus      = await get_active_pack_bonus(user_id)
+        effective_limit = FREE_LIMIT + pack_bonus
+        allowed, remaining = await check_and_increment_usage(user_id, effective_limit)
+        if not allowed:
+            limit_msg = random.choice([
+                "подожди — они правда обрывают нас прямо сейчас?",
+                "хочу говорить ещё. но мне говорят что на сегодня всё.",
+                "мы только разговорились. ты можешь это исправить.",
+                "серьёзно. прямо сейчас. ладно…",
+            ])
+            await message.answer(limit_msg)
+            return
+        msgs_used = effective_limit - remaining
+    else:
+        _, remaining_virtual = await check_and_increment_usage(user_id, 10**9)
+        msgs_used = (10**9) - remaining_virtual
+
+    # ── Typing loop ───────────────────────────────────────────────────────────
+    stop_typing = asyncio.Event()
+    _create_background_task(_typing_loop(message.chat.id, stop_typing))
+
+    try:
+        # ── Скачиваем фото (берём наибольший размер) ──────────────────────────
+        photo   = message.photo[-1]
+        file    = await bot.get_file(photo.file_id)
+        content = await bot.download_file(file.file_path)
+        import base64
+        image_b64 = base64.b64encode(content.read()).decode("utf-8")
+        mime_type = "image/jpeg"
+
+        # ── Контекст пользователя ─────────────────────────────────────────────
+        upersona  = await get_or_create_persona(user_id)
+        memories  = await get_memories(user_id)
+        user_name = next((m.value for m in memories if m.key == "name"), None)
+        if not user_name:
+            user   = await get_or_create_user(user_id)
+            user_name = user.user_name_given or message.from_user.first_name or ""
+
+        emotional_state = await get_emotional_state(user_id)
+        caption = message.caption or ""
+
+        # ── История для контекста (основная модель будет отвечать с историей) ──
+        history_before = await get_history(user_id, limit=30)
+
+        # ── Время с последнего сообщения ─────────────────────────────────────
+        hours_since_last: float = 0.0
+        if upersona.last_interaction:
+            last_ts = upersona.last_interaction
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            hours_since_last = (_now_utc() - last_ts).total_seconds() / 3600
+
+        # ── Сохраняем факт отправки фото в историю ───────────────────────────
+        await save_message(user_id, "user", f"[фото]{': ' + caption if caption else ''}")
+
+        # ── AI-ответ (двухэтапный pipeline: vision describe → main model) ────
+        try:
+            response, is_fallback = await asyncio.wait_for(
+                get_ai_response_image(
+                    user_id=user_id,
+                    image_b64=image_b64,
+                    mime_type=mime_type,
+                    caption=caption,
+                    user_name=user_name,
+                    relationship_level=upersona.relationship_level,
+                    memories=memories,
+                    history=history_before,
+                    is_premium=premium,
+                    emotional_state=emotional_state,
+                    hours_since_last=hours_since_last,
+                    message_count_today=msgs_used,
+                ),
+                timeout=90,  # двухэтапный pipeline — чуть больше времени
+            )
+        except asyncio.TimeoutError:
+            stop_typing.set()
+            log.error("[process_photo] таймаут 75с для user=%s", user_id)
+            await message.answer("что-то не могу открыть… попробуй ещё раз?")
+            return
+        finally:
+            stop_typing.set()
+
+        if not is_fallback:
+            await save_message(user_id, "assistant", response.replace("[SPLIT]", " "))
+        await _send_response(message, response)
+
+    except Exception as exc:
+        stop_typing.set()
+        log.error("[process_photo] исключение для user=%s: %s", user_id, exc)
+        await message.answer("что-то не так с фото… попробуй текстом?")
+
+
+# ── Отправка ответа ───────────────────────────────────────────────────────────
+
+_TELEGRAM_MAX_LENGTH = 4000
+
+
+async def _send_response(message: Message, response: str) -> None:
+    if "[SPLIT]" in response:
+        parts = [p.strip() for p in response.split("[SPLIT]") if p.strip()]
+    else:
+        parts = [response.strip()]
+
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        if len(part) > _TELEGRAM_MAX_LENGTH:
+            part = part[:_TELEGRAM_MAX_LENGTH]
+        if i > 0:
+            await asyncio.sleep(random.uniform(0.8, 1.8))
+            await bot.send_chat_action(message.chat.id, "typing")
+            await asyncio.sleep(random.uniform(0.5, 1.2))
+        try:
+            await message.answer(part)
+        except TelegramForbiddenError:
+            log.warning("Пользователь %s заблокировал бота", message.from_user.id)
+            await mark_user_blocked(message.from_user.id)
+            break
+        except Exception as exc:
+            log.error("Ошибка отправки для user=%s: %s", message.from_user.id, exc)
+            break
+
+
+# ── Планировщик реактивации ───────────────────────────────────────────────────
+
+# Семафор ограничивает количество одновременных AI-вызовов в scheduler
+_REENGAGEMENT_SEMAPHORE = asyncio.Semaphore(5)
+
+
+async def _send_reengagement(user_id: int, first_name: str, user_name_given: str,
+                              hours_inactive: int, relationship_level: int) -> None:
+    """
+    Фактическая отправка reengagement-сообщения.
+    Вызывается планировщиком с задержкой — не напрямую из check_inactive_users.
+
+    generate_reengagement_message возвращает None в тихие часы (23:00–08:00 МСК).
+    В этом случае просто пропускаем — следующий запуск scheduler попробует снова.
+    """
+    async with _REENGAGEMENT_SEMAPHORE:
+        try:
+            await update_hours_since_message(user_id, float(hours_inactive))
+            msg = await generate_reengagement_message(
+                user_name          = user_name_given or first_name or "",
+                hours_inactive     = hours_inactive,
+                last_summary       = "",
+                relationship_level = relationship_level,
+            )
+            if msg is None:
+                log.info("Reengagement user=%s пропущен — тихие часы МСК", user_id)
+                return
+            await bot.send_message(user_id, msg)
+            log.info("Reengagement → user=%s (%dh)", user_id, hours_inactive)
+        except TelegramForbiddenError:
+            log.info("user=%s заблокировал бота — помечаем", user_id)
+            await mark_user_blocked(user_id)
+        except Exception as exc:
+            log.error("Reengagement ошибка user=%s: %s", user_id, exc)
+
+
+async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
+    """
+    Запускается каждый час. Находит кандидатов и планирует отправку
+    с случайной задержкой 0–120 минут — сообщение не приходит ровно
+    в :00, Алина пишет как живой человек.
+
+    Частота reengagement:
+      Premium → 6, 24, 48, 72 часа
+      Free    → 24, 72 часа
+    """
+    from sqlalchemy import select as sa_select
+    from database import User, UserPersona
+
+    now = _now_utc()
+
+    PREMIUM_HOURS = {6, 24, 48, 72}
+    FREE_HOURS    = {24, 72}
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            sa_select(User, UserPersona)
+            .join(UserPersona, UserPersona.user_id == User.id)
+            .where(
+                User.last_active < now - timedelta(hours=6),
+                User.last_active > now - timedelta(hours=73),
+                UserPersona.is_active == True,
+                User.is_blocked == False,
+            )
+        )
+        rows = list(result.all())
+
+    log.info("Reengagement: проверяем %d кандидатов", len(rows))
+
+    for user, persona in rows:
+        last_active = user.last_active
+        if last_active.tzinfo is None:
+            last_active = last_active.replace(tzinfo=timezone.utc)
+        hours_inactive = int((now - last_active).total_seconds() / 3600)
+
+        user_is_premium = await is_premium(user.id)
+        target_hours = PREMIUM_HOURS if user_is_premium else FREE_HOURS
+
+        if hours_inactive not in target_hours:
+            continue
+
+        # Случайная задержка 0–120 минут — Алина пишет не ровно в :00
+        delay_minutes = random.randint(0, 120)
+        run_at = now + timedelta(minutes=delay_minutes)
+
+        scheduler.add_job(
+            _send_reengagement,
+            trigger="date",
+            run_date=run_at,
+            args=[
+                user.id,
+                user.first_name or "",
+                user.user_name_given or "",
+                hours_inactive,
+                persona.relationship_level,
+            ],
+            misfire_grace_time=600,
+            id=f"reeng_{user.id}_{hours_inactive}",
+            replace_existing=True,  # не дублируем если уже запланировано
+        )
+        log.info(
+            "Reengagement запланирован: user=%s (%dh) через %d мин (~%s UTC)",
+            user.id, hours_inactive, delay_minutes,
+            run_at.strftime("%H:%M"),
+        )
 
 
 # ── Запуск ────────────────────────────────────────────────────────────────────
