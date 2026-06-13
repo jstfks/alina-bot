@@ -730,6 +730,177 @@ async def _typing_loop(chat_id: int, stop_event: asyncio.Event) -> None:
             pass
 
 
+# ── Broadcast ────────────────────────────────────────────────────────────────
+#
+# /broadcast <текст> — рассылает сообщение всем пользователям.
+# Сообщение сохраняется в историю как role="assistant" —
+# модель будет считать что сама это написала при следующем ответе.
+#
+# Доступно только ADMIN_ID (задаётся в Railway Variables).
+# Пример: ADMIN_ID=123456789
+
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+
+async def _broadcast_to_all(
+    text: str | None = None,
+    photo_file_id: str | None = None,
+    photo_caption: str | None = None,
+    videonote_file_id: str | None = None,
+    description: str | None = None,  # что на фото/кружке — для модели
+) -> tuple[int, int]:
+    """
+    Рассылает сообщение всем незаблокированным пользователям.
+    Поддерживает: текст / фото (с подписью) / кружок.
+    description — описание содержимого медиа для модели (не видно пользователю).
+    Сохраняет в историю как role="assistant".
+    Возвращает (sent, failed).
+    """
+    from sqlalchemy import select as sa_select
+    from database import User, save_message
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            sa_select(User).where(User.is_blocked == False)
+        )
+        users = list(result.scalars().all())
+
+    # Что сохраняем в историю — модель это видит, пользователь нет.
+    # description даёт модели контекст что именно на фото/кружке.
+    if photo_file_id:
+        history_text = f"[отправила фото]{': ' + photo_caption if photo_caption else ''}"
+        if description:
+            history_text += f" [на фото: {description}]"
+    elif videonote_file_id:
+        history_text = f"[отправила кружок: {description}]" if description else "[отправила кружок]"
+    else:
+        history_text = text or ""
+
+    sent = failed = 0
+    for user in users:
+        try:
+            await save_message(user.id, "assistant", history_text)
+
+            if photo_file_id:
+                await bot.send_photo(
+                    user.id,
+                    photo=photo_file_id,
+                    caption=photo_caption or "",
+                )
+            elif videonote_file_id:
+                await bot.send_video_note(user.id, video_note=videonote_file_id)
+            else:
+                await bot.send_message(user.id, text)
+
+            sent += 1
+        except TelegramForbiddenError:
+            await mark_user_blocked(user.id)
+            failed += 1
+        except Exception as exc:
+            log.warning("Broadcast: ошибка для user=%s: %s", user.id, exc)
+            failed += 1
+        await asyncio.sleep(0.05)
+
+    return sent, failed
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message) -> None:
+    """
+    Текстовая рассылка: /broadcast <текст>
+    Для фото и кружков — пересылай медиа боту с подписью /broadcast [текст]
+    """
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        return
+
+    text = message.text.removeprefix("/broadcast").strip()
+    if not text:
+        await message.answer(
+            "Использование:\n"
+            "• Текст: /broadcast <текст>\n"
+            "• Фото: отправь фото с подписью /broadcast [текст]\n"
+            "• Кружок: отправь кружок с подписью /broadcast"
+        )
+        return
+
+    await message.answer(f"Рассылка начата…\n\nТекст: «{text}»")
+    sent, failed = await _broadcast_to_all(text=text)
+    await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
+
+
+async def cmd_broadcast_photo(message: Message) -> None:
+    """
+    Фото с подписью /broadcast [подпись пользователю] | [описание для модели]
+    Символ | разделяет: левая часть — подпись под фото, правая — описание для модели.
+    Примеры:
+      /broadcast                          → фото без подписи, модель знает факт отправки
+      /broadcast скучала по тебе          → подпись пользователю, без описания
+      /broadcast | улыбаюсь, волосы распущены, дома   → нет подписи, только описание модели
+      /broadcast скучала | улыбаюсь, дома → подпись + описание
+    """
+    caption = message.caption or ""
+    if not caption.startswith("/broadcast"):
+        return
+
+    rest = caption.removeprefix("/broadcast").strip()
+
+    # Парсим разделитель |
+    if "|" in rest:
+        parts = rest.split("|", 1)
+        photo_caption = parts[0].strip() or None
+        description   = parts[1].strip() or None
+    else:
+        photo_caption = rest or None
+        description   = None
+
+    file_id = message.photo[-1].file_id
+
+    preview = photo_caption or "—"
+    desc_preview = description or "—"
+    await message.answer(
+        f"Рассылка фото начата…\n"
+        f"Подпись пользователю: {preview}\n"
+        f"Описание для модели: {desc_preview}"
+    )
+    sent, failed = await _broadcast_to_all(
+        photo_file_id=file_id,
+        photo_caption=photo_caption,
+        description=description,
+    )
+    await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
+
+
+@dp.message(F.video_note, F.from_user.func(lambda u: u.id == ADMIN_ID))
+async def cmd_broadcast_videonote(message: Message) -> None:
+    """
+    Кружок. Описание для модели передаётся реплаем на сообщение с текстом.
+    Отправь текст-описание, потом сделай reply кружком на него.
+    Если reply нет — модель знает только факт отправки кружка.
+
+    Пример:
+      1. Пишешь боту: "улыбаюсь, за окном дождь, дома"
+      2. Делаешь reply кружком на это сообщение
+      → модель получит: [отправила кружок: улыбаюсь, за окном дождь, дома]
+    """
+    # Берём описание из reply-сообщения если есть
+    description = None
+    if message.reply_to_message and message.reply_to_message.text:
+        description = message.reply_to_message.text.strip()[:200]
+
+    file_id = message.video_note.file_id
+
+    desc_preview = description or "—"
+    await message.answer(
+        f"Рассылка кружка начата…\n"
+        f"Описание для модели: {desc_preview}"
+    )
+    sent, failed = await _broadcast_to_all(
+        videonote_file_id=file_id,
+        description=description,
+    )
+    await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
+
+
 # ── Основной обработчик сообщений ─────────────────────────────────────────────
 
 @dp.message(F.text)
@@ -935,177 +1106,6 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
             fresh_history = await get_history(user_id, limit=16)
             convo_dicts = [{"role": m.role, "content": m.content} for m in fresh_history]
         _create_background_task(extract_emotional_state(user_id, convo_dicts))
-
-
-# ── Broadcast ────────────────────────────────────────────────────────────────
-#
-# /broadcast <текст> — рассылает сообщение всем пользователям.
-# Сообщение сохраняется в историю как role="assistant" —
-# модель будет считать что сама это написала при следующем ответе.
-#
-# Доступно только ADMIN_ID (задаётся в Railway Variables).
-# Пример: ADMIN_ID=123456789
-
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-
-async def _broadcast_to_all(
-    text: str | None = None,
-    photo_file_id: str | None = None,
-    photo_caption: str | None = None,
-    videonote_file_id: str | None = None,
-    description: str | None = None,  # что на фото/кружке — для модели
-) -> tuple[int, int]:
-    """
-    Рассылает сообщение всем незаблокированным пользователям.
-    Поддерживает: текст / фото (с подписью) / кружок.
-    description — описание содержимого медиа для модели (не видно пользователю).
-    Сохраняет в историю как role="assistant".
-    Возвращает (sent, failed).
-    """
-    from sqlalchemy import select as sa_select
-    from database import User, save_message
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            sa_select(User).where(User.is_blocked == False)
-        )
-        users = list(result.scalars().all())
-
-    # Что сохраняем в историю — модель это видит, пользователь нет.
-    # description даёт модели контекст что именно на фото/кружке.
-    if photo_file_id:
-        history_text = f"[отправила фото]{': ' + photo_caption if photo_caption else ''}"
-        if description:
-            history_text += f" [на фото: {description}]"
-    elif videonote_file_id:
-        history_text = f"[отправила кружок: {description}]" if description else "[отправила кружок]"
-    else:
-        history_text = text or ""
-
-    sent = failed = 0
-    for user in users:
-        try:
-            await save_message(user.id, "assistant", history_text)
-
-            if photo_file_id:
-                await bot.send_photo(
-                    user.id,
-                    photo=photo_file_id,
-                    caption=photo_caption or "",
-                )
-            elif videonote_file_id:
-                await bot.send_video_note(user.id, video_note=videonote_file_id)
-            else:
-                await bot.send_message(user.id, text)
-
-            sent += 1
-        except TelegramForbiddenError:
-            await mark_user_blocked(user.id)
-            failed += 1
-        except Exception as exc:
-            log.warning("Broadcast: ошибка для user=%s: %s", user.id, exc)
-            failed += 1
-        await asyncio.sleep(0.05)
-
-    return sent, failed
-
-
-@dp.message(Command("broadcast"))
-async def cmd_broadcast(message: Message) -> None:
-    """
-    Текстовая рассылка: /broadcast <текст>
-    Для фото и кружков — пересылай медиа боту с подписью /broadcast [текст]
-    """
-    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        return
-
-    text = message.text.removeprefix("/broadcast").strip()
-    if not text:
-        await message.answer(
-            "Использование:\n"
-            "• Текст: /broadcast <текст>\n"
-            "• Фото: отправь фото с подписью /broadcast [текст]\n"
-            "• Кружок: отправь кружок с подписью /broadcast"
-        )
-        return
-
-    await message.answer(f"Рассылка начата…\n\nТекст: «{text}»")
-    sent, failed = await _broadcast_to_all(text=text)
-    await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
-
-
-async def cmd_broadcast_photo(message: Message) -> None:
-    """
-    Фото с подписью /broadcast [подпись пользователю] | [описание для модели]
-    Символ | разделяет: левая часть — подпись под фото, правая — описание для модели.
-    Примеры:
-      /broadcast                          → фото без подписи, модель знает факт отправки
-      /broadcast скучала по тебе          → подпись пользователю, без описания
-      /broadcast | улыбаюсь, волосы распущены, дома   → нет подписи, только описание модели
-      /broadcast скучала | улыбаюсь, дома → подпись + описание
-    """
-    caption = message.caption or ""
-    if not caption.startswith("/broadcast"):
-        return
-
-    rest = caption.removeprefix("/broadcast").strip()
-
-    # Парсим разделитель |
-    if "|" in rest:
-        parts = rest.split("|", 1)
-        photo_caption = parts[0].strip() or None
-        description   = parts[1].strip() or None
-    else:
-        photo_caption = rest or None
-        description   = None
-
-    file_id = message.photo[-1].file_id
-
-    preview = photo_caption or "—"
-    desc_preview = description or "—"
-    await message.answer(
-        f"Рассылка фото начата…\n"
-        f"Подпись пользователю: {preview}\n"
-        f"Описание для модели: {desc_preview}"
-    )
-    sent, failed = await _broadcast_to_all(
-        photo_file_id=file_id,
-        photo_caption=photo_caption,
-        description=description,
-    )
-    await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
-
-
-@dp.message(F.video_note, F.from_user.func(lambda u: u.id == ADMIN_ID))
-async def cmd_broadcast_videonote(message: Message) -> None:
-    """
-    Кружок. Описание для модели передаётся реплаем на сообщение с текстом.
-    Отправь текст-описание, потом сделай reply кружком на него.
-    Если reply нет — модель знает только факт отправки кружка.
-
-    Пример:
-      1. Пишешь боту: "улыбаюсь, за окном дождь, дома"
-      2. Делаешь reply кружком на это сообщение
-      → модель получит: [отправила кружок: улыбаюсь, за окном дождь, дома]
-    """
-    # Берём описание из reply-сообщения если есть
-    description = None
-    if message.reply_to_message and message.reply_to_message.text:
-        description = message.reply_to_message.text.strip()[:200]
-
-    file_id = message.video_note.file_id
-
-    desc_preview = description or "—"
-    await message.answer(
-        f"Рассылка кружка начата…\n"
-        f"Описание для модели: {desc_preview}"
-    )
-    sent, failed = await _broadcast_to_all(
-        videonote_file_id=file_id,
-        description=description,
-    )
-    await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
 
 
 # ── Обработчик фотографий ─────────────────────────────────────────────────────
