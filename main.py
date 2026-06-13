@@ -1,24 +1,25 @@
-"""
-main.py — Точка входа Telegram-бота Алина. v2.
+﻿"""
+main.py — Точка входа Telegram-бота Алина. v3.
 
-Второй аудит — исправленные проблемы:
-- upersona.relationship_level был stale после update_relationship().
-  Теперь get_ai_response получает new_level (результат update_relationship).
-- history[:-1] заменён на явный срез по времени: история загружается
-  ДО save_message, исключая хрупкую зависимость от порядка записей.
-- convo_dicts строится ПОСЛЕ сохранения AI-ответа, включая текущий обмен.
-- Модульный счётчик для memory extraction: считает реальное число сообщений
-  в истории, а не полагается на history[-1] % 6 == 0 (который всегда True
-  при limit=30 и >=30 сообщениях).
-- get_ai_response теперь возвращает (text, is_fallback) — fallback-ответы
-  не сохраняются в историю и не увеличивают relationship_score.
-- per-user дедупликация запросов: asyncio.Lock на user_id предотвращает
-  одновременную обработку нескольких сообщений одного пользователя.
-- Reengagement scheduler: asyncio.Semaphore ограничивает concurrency,
-  TelegramForbiddenError → mark_user_blocked.
-- activate_subscription вместо прямого INSERT (идемпотентность).
-- Telegram first_name может содержать \n — sanitise_prompt_string в ai.py
-  теперь это нейтрализует.
+Третий аудит — исправленные проблемы:
+- message_count_today для premium больше не всегда 0. Раньше считался
+  как FREE_LIMIT - remaining, а для premium remaining = FREE_LIMIT,
+  что давало 0 на любом сообщении и ломало build_session_arc /
+  build_context_layers (premium застревал в "ранней стадии" сессии).
+  Теперь msgs_used считается единообразно: для free/pack — из
+  check_and_increment_usage(effective_limit), для premium — через
+  виртуальный счётчик check_and_increment_usage(user_id, 10**9)
+  без блокировки.
+- handle_photo (F.photo) перехватывал ВСЕ фото от админа раньше, чем
+  cmd_broadcast_photo успевал сработать — рассылка фото была мёртвым
+  кодом. Теперь handle_photo проверяет ADMIN_ID + caption.startswith
+  ("/broadcast") и делегирует в cmd_broadcast_photo напрямую; дублирующий
+  недостижимый декоратор у cmd_broadcast_photo удалён.
+- _process_photo игнорировал is_premium и pack_bonus при проверке
+  дневного лимита (всегда check_and_increment_usage(user_id, FREE_LIMIT)).
+  Premium/pack-пользователи могли получить отказ по фото при исчерпанном
+  текстовом лимите. Теперь лимит для фото пропускается для premium и
+  расширяется pack_bonus как у текстовых сообщений.
 """
 
 from __future__ import annotations
@@ -841,7 +842,15 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
         if msgs_used == SOFT_LIMIT:
             soft_warning = random.choice(SOFT_LIMIT_VARIANTS)
     else:
-        remaining = FREE_LIMIT  # у Premium неограниченно
+        # У Premium нет лимита, но нам всё равно нужен реальный счётчик
+        # сообщений за сегодня — он используется для session arc
+        # (build_session_arc / build_context_layers), чтобы тон ответа
+        # развивался по ходу разговора, а не оставался "ранней стадией"
+        # для всех premium-сообщений.
+        # check_and_increment_usage с огромным лимитом не блокирует,
+        # но честно инкрементирует и возвращает остаток.
+        _, remaining_virtual = await check_and_increment_usage(user_id, 10**9)
+        msgs_used = (10**9) - remaining_virtual
 
     # ── Загружаем историю ДО save_message — она нужна для memory extraction ───
     # ВАЖНО: загружаем историю здесь, до сохранения текущего сообщения.
@@ -906,7 +915,7 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
                 user_name           = user_name,
                 relationship_level  = new_level,
                 memories            = memories,
-                message_count_today = FREE_LIMIT - remaining,
+                message_count_today = msgs_used,
                 is_premium          = premium,
                 emotional_state     = emotional_state,
                 hours_since_last    = hours_since_last,
@@ -956,6 +965,17 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
 
 @dp.message(F.photo)
 async def handle_photo(message: Message) -> None:
+    # Админский /broadcast с фото обрабатывается отдельно (рассылка),
+    # а не как обычное сообщение боту. Раньше этот хендлер был
+    # зарегистрирован раньше cmd_broadcast_photo и перехватывал ВСЕ
+    # фото от админа, из-за чего рассылка фото была мёртвым кодом.
+    if (
+        message.from_user.id == ADMIN_ID
+        and (message.caption or "").startswith("/broadcast")
+    ):
+        await cmd_broadcast_photo(message)
+        return
+
     user_id = message.from_user.id
     lock    = _user_locks[user_id]
     async with lock:
@@ -966,17 +986,20 @@ async def _process_photo(message: Message) -> None:
     user_id = message.from_user.id
 
     # ── Лимиты (те же что у текстовых сообщений) ─────────────────────────────
-    premium          = await is_premium(user_id)
-    allowed, remaining = await check_and_increment_usage(user_id, FREE_LIMIT)
-    if not allowed:
-        limit_msg = random.choice([
-            "подожди — они правда обрывают нас прямо сейчас?",
-            "хочу говорить ещё. но мне говорят что на сегодня всё.",
-            "мы только разговорились. ты можешь это исправить.",
-            "серьёзно. прямо сейчас. ладно…",
-        ])
-        await message.answer(limit_msg)
-        return
+    premium = await is_premium(user_id)
+    if not premium:
+        pack_bonus      = await get_active_pack_bonus(user_id)
+        effective_limit = FREE_LIMIT + pack_bonus
+        allowed, _ = await check_and_increment_usage(user_id, effective_limit)
+        if not allowed:
+            limit_msg = random.choice([
+                "подожди — они правда обрывают нас прямо сейчас?",
+                "хочу говорить ещё. но мне говорят что на сегодня всё.",
+                "мы только разговорились. ты можешь это исправить.",
+                "серьёзно. прямо сейчас. ладно…",
+            ])
+            await message.answer(limit_msg)
+            return
 
     # ── Typing loop ───────────────────────────────────────────────────────────
     stop_typing = asyncio.Event()
@@ -1289,7 +1312,6 @@ async def cmd_broadcast(message: Message) -> None:
     await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
 
 
-@dp.message(F.photo, F.from_user.func(lambda u: u.id == ADMIN_ID))
 async def cmd_broadcast_photo(message: Message) -> None:
     """
     Фото с подписью /broadcast [подпись пользователю] | [описание для модели]
@@ -1391,3 +1413,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
