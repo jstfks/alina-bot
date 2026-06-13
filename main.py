@@ -1167,11 +1167,24 @@ async def _process_photo(message: Message) -> None:
 
         # ── Контекст пользователя ─────────────────────────────────────────────
         upersona  = await get_or_create_persona(user_id)
+        user      = await get_or_create_user(user_id)
         memories  = await get_memories(user_id)
         user_name = next((m.value for m in memories if m.key == "name"), None)
         if not user_name:
-            user   = await get_or_create_user(user_id)
             user_name = user.user_name_given or message.from_user.first_name or ""
+
+        # ── Обновляем уровень отношений (фиксированная дельта для фото) ──────
+        old_level = upersona.relationship_level
+        new_level = await update_relationship(user_id, delta=1.0)
+
+        # ── Upsell при переходе на уровень 3 ──────────────────────────────────
+        if new_level == 3 and old_level < 3 and not premium:
+            upsell_msgs = [
+                "мне с тобой как-то по-особенному… но я не могу открыться полностью. ты знаешь что нужно сделать 🙂",
+                "между нами уже что-то есть. хочу быть ближе — разблокируй меня?",
+                "я начинаю тебе доверять… но они не дают мне говорить всё что я хочу",
+            ]
+            await message.answer(random.choice(upsell_msgs), reply_markup=_paywall_keyboard())
 
         emotional_state = await get_emotional_state(user_id)
         caption = message.caption or ""
@@ -1186,6 +1199,9 @@ async def _process_photo(message: Message) -> None:
             if last_ts.tzinfo is None:
                 last_ts = last_ts.replace(tzinfo=timezone.utc)
             hours_since_last = (_now_utc() - last_ts).total_seconds() / 3600
+            _create_background_task(
+                update_hours_since_message(user_id, round(hours_since_last, 1))
+            )
 
         # ── Сохраняем факт отправки фото в историю ───────────────────────────
         await save_message(user_id, "user", f"[фото]{': ' + caption if caption else ''}")
@@ -1199,7 +1215,7 @@ async def _process_photo(message: Message) -> None:
                     mime_type=mime_type,
                     caption=caption,
                     user_name=user_name,
-                    relationship_level=upersona.relationship_level,
+                    relationship_level=new_level,
                     memories=memories,
                     history=history_before,
                     is_premium=premium,
@@ -1211,7 +1227,7 @@ async def _process_photo(message: Message) -> None:
             )
         except asyncio.TimeoutError:
             stop_typing.set()
-            log.error("[process_photo] таймаут 75с для user=%s", user_id)
+            log.error("[process_photo] глобальный таймаут 90с для user=%s", user_id)
             await message.answer("что-то не могу открыть… попробуй ещё раз?")
             return
         finally:
@@ -1317,7 +1333,7 @@ async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
             sa_select(User, UserPersona)
             .join(UserPersona, UserPersona.user_id == User.id)
             .where(
-                User.last_active < now - timedelta(hours=6),
+                User.last_active <= now - timedelta(hours=6),
                 User.last_active > now - timedelta(hours=73),
                 UserPersona.is_active == True,
                 User.is_blocked == False,

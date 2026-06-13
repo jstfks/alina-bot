@@ -27,6 +27,7 @@ from typing import Optional
 import aiohttp
 
 from database import (
+    get_emotional_state,
     save_memory,
     save_emotional_state,
     update_emotional_state_hours,
@@ -316,11 +317,18 @@ async def extract_emotional_state(user_id: int, conversation: list[dict]) -> Non
         if mood not in _VALID_MOODS:
             mood = "neutral"
 
+        # Сохраняем текущее значение hours_since_last_message —
+        # update_emotional_state_hours из _process_message уже мог
+        # записать актуальное время с последнего сообщения.
+        existing = await get_emotional_state(user_id)
+        current_hours = existing.hours_since_last_message if existing else 0.0
+
         await save_emotional_state(
             user_id=user_id,
             mood_after_last_session=mood,
             last_emotional_moment=str(result.get("last_moment", ""))[:200],
             open_topics=str(result.get("open_topics", ""))[:200],
+            hours_since_last_message=current_hours,
         )
 
     except Exception as exc:
