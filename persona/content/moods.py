@@ -1,7 +1,7 @@
 """
 persona/content/moods.py — Поведение по эмоциональным состояниям.
 
-Подключается: ТОЛЬКО если emotional_state задан (не None).
+Подключается: если session_count >= 5 ИЛИ emotional_state задан (не None).
 Размер: ~200 токенов.
 
 Приоритет правил: core.py > relationship.py > этот файл.
