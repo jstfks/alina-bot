@@ -1,4 +1,4 @@
-"""
+﻿"""
 main.py — Точка входа Telegram-бота Алина. v4. FREE_LIMIT=20.
 
 Четвёртый аудит — исправленные проблемы:
@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -156,12 +157,12 @@ async def cmd_start(message: Message) -> None:
 
     history = await get_history(user_id, limit=1)
     if history:
-        await message.answer("привет) я здесь 🙂")
+        await message.answer("привет) я здесь🙂")
         return
 
     variants = [
         "привет)\nкак тебя зовут?",
-        "привет 🙂\nрасскажи что-нибудь — не люблю начинать с «как дела».",
+        "привет)\nрасскажи что-нибудь — не люблю начинать с «как дела».",
         "привет)\nстранный день. как ты?",
         "привет. мне сказали ты интересный человек. это правда?",
     ]
@@ -751,9 +752,11 @@ async def _broadcast_to_all(
     photo_caption: str | None = None,
     videonote_file_id: str | None = None,
     description: str | None = None,  # что на фото/кружке — для модели
+    batch_size: int = 20,
+    batch_delay: float = 0.5,
 ) -> tuple[int, int]:
     """
-    Рассылает сообщение всем незаблокированным пользователям.
+    Рассылает сообщение всем незаблокированным пользователям батчами.
     Поддерживает: текст / фото (с подписью) / кружок.
     description — описание содержимого медиа для модели (не видно пользователю).
     Сохраняет в историю как role="assistant".
@@ -780,7 +783,9 @@ async def _broadcast_to_all(
         history_text = text or ""
 
     sent = failed = 0
-    for user in users:
+
+    async def _send_one(user):
+        nonlocal sent, failed
         try:
             await save_message(user.id, "assistant", history_text)
 
@@ -802,7 +807,13 @@ async def _broadcast_to_all(
         except Exception as exc:
             log.warning("Broadcast: ошибка для user=%s: %s", user.id, exc)
             failed += 1
-        await asyncio.sleep(0.05)
+
+    # Рассылаем батчами
+    for i in range(0, len(users), batch_size):
+        batch = users[i:i + batch_size]
+        await asyncio.gather(*[_send_one(u) for u in batch])
+        if i + batch_size < len(users):
+            await asyncio.sleep(batch_delay)
 
     return sent, failed
 
@@ -935,6 +946,22 @@ async def cmd_set_level(message: Message) -> None:
         await message.answer(f"❌ Пользователь {target_id} не найден или ошибка")
 
 
+# ── Rate-limit: защита от спама (5 сообщений за 10 секунд) ────────────────────
+_USER_MSG_TIMES: dict[int, list[float]] = {}
+
+async def _check_rate_limit(user_id: int) -> bool:
+    """Возвращает True если лимит не превышен, False если спам."""
+    now = time.time()
+    times = _USER_MSG_TIMES.get(user_id, [])
+    # оставляем только последние 10 секунд
+    times = [t for t in times if now - t < 10]
+    if len(times) >= 5:
+        return False
+    times.append(now)
+    _USER_MSG_TIMES[user_id] = times
+    return True
+
+
 # ── Основной обработчик сообщений ─────────────────────────────────────────────
 
 @dp.message(F.text)
@@ -947,6 +974,11 @@ async def handle_message(message: Message) -> None:
 
     if len(user_text) > 4000:
         await message.answer("сообщение слишком длинное… напиши покороче?")
+        return
+
+    # Rate-limit check
+    if not await _check_rate_limit(user_id):
+        await message.answer("стой, прекрати… не так быстро) ")
         return
 
     # ── Перехват запросов порно/секс-стикеров ────────────────────────────────
