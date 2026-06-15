@@ -72,17 +72,25 @@ startCommand = "python main.py"
 restartPolicyType = "always"
 ```
 
-## Переменные окружения
+## Команды бота
 
-| Переменная | Обязательная | Описание |
-|------------|-------------|----------|
-| `BOT_TOKEN` | Да | Telegram Bot API токен |
-| `OPENROUTER_API_KEY` | Да | OpenRouter API ключ |
-| `GEMINI_API_KEY` | Нет | Gemini API ключ (fallback) |
-| `DEEPSEEK_API_KEY` | Нет | DeepSeek API ключ (fallback) |
-| `DATABASE_URL` | Да | PostgreSQL DSN (`postgresql+asyncpg://...`) |
-| `ADMIN_ID` | Да | Telegram ID администратора |
-| `PAYMENT_PROVIDER_TOKEN` | Да | Telegram Payments токен |
+### Пользовательские
+| Команда | Описание |
+|---------|----------|
+| `/start` | Начать диалог / приветствие |
+| `/menu` | Статус лимитов и ссылка на подписку |
+| `/help` | Интерактивное меню помощи |
+| `/premium` | Купить подписку / пакет сообщений |
+
+### Администраторские (требуют `ADMIN_ID`)
+| Команда | Описание |
+|---------|----------|
+| `/broadcast <текст>` | Текстовая рассылка всем пользователям |
+| `/broadcast` (с фото) | Рассылка фото с подписью |
+| `/broadcast` (кружок) | Рассылка видеокружка (reply на текст-описание) |
+| `/set_level <user_id> <1-5>` | Установить уровень отношений пользователю |
+
+## Переменные окружения
 
 ## Требования
 

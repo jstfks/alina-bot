@@ -1,4 +1,4 @@
-﻿"""
+"""
 main.py — Точка входа Telegram-бота Алина. v4. FREE_LIMIT=20.
 
 Четвёртый аудит — исправленные проблемы:
@@ -63,6 +63,7 @@ from database import (
     mark_paywall_shown_level3,
     mark_user_blocked,
     save_message,
+    set_relationship_level,
     update_relationship,
 )
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
@@ -901,6 +902,37 @@ async def cmd_broadcast_videonote(message: Message) -> None:
         description=description,
     )
     await message.answer(f"Готово. Отправлено: {sent} · Ошибок: {failed}")
+
+
+# ── Админ: установка уровня отношений ───────────────────────────────────────────
+# /set_level <user_id> <1-5>
+
+@dp.message(Command("set_level"))
+async def cmd_set_level(message: Message) -> None:
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        return
+
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("Использование: /set_level <user_id> <1-5>")
+        return
+
+    try:
+        target_id = int(args[1])
+        level = int(args[2])
+    except ValueError:
+        await message.answer("user_id и level должны быть числами")
+        return
+
+    if not 1 <= level <= 5:
+        await message.answer("level должен быть от 1 до 5")
+        return
+
+    ok = await set_relationship_level(target_id, level)
+    if ok:
+        await message.answer(f"✅ Уровень отношений для user={target_id} установлен на {level}")
+    else:
+        await message.answer(f"❌ Пользователь {target_id} не найден или ошибка")
 
 
 # ── Основной обработчик сообщений ─────────────────────────────────────────────

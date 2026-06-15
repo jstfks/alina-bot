@@ -736,6 +736,37 @@ async def update_relationship(
         return persona.relationship_level
 
 
+async def set_relationship_level(
+    user_id: int,
+    level: int,
+    persona_id: str = "alina",
+) -> bool:
+    """Устанавливает уровень отношений напрямую (админка)."""
+    if not 1 <= level <= 5:
+        return False
+    # минимальный score для уровня
+    score_map = {1: 0, 2: 150, 3: 300, 4: 600, 5: 1125}
+    target_score = score_map[level]
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(UserPersona).where(
+                UserPersona.user_id == user_id,
+                UserPersona.persona_id == persona_id,
+            ).with_for_update()
+        )
+        persona = result.scalar_one_or_none()
+        if persona is None:
+            return False
+
+        persona.relationship_level = level
+        persona.relationship_score = target_score
+        persona.last_interaction = _now_utc()
+
+        await session.commit()
+        return True
+
+
 async def mark_paywall_shown_level3(user_id: int, persona_id: str = "alina") -> bool:
     """
     Atomic-но помечает, что апселл на уровне 3 уже показан.
