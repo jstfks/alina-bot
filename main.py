@@ -1,4 +1,4 @@
-﻿"""
+"""
 main.py — Точка входа Telegram-бота Алина. v4. FREE_LIMIT=20.
 
 Четвёртый аудит — исправленные проблемы:
@@ -50,7 +50,6 @@ from cache import get_premium, invalidate_premium_cache
 from database import (
     AsyncSessionLocal,
     activate_subscription,
-    get_active_pack_bonus,
     check_and_increment_usage,
     check_daily_limit,
     get_emotional_state,
@@ -58,6 +57,7 @@ from database import (
     get_memories,
     get_or_create_persona,
     get_or_create_user,
+    get_user_context,
     hide_paywall_messages,
     init_db,
     is_premium,
@@ -66,6 +66,7 @@ from database import (
     save_message,
     set_relationship_level,
     update_relationship,
+    UserContext,
 )
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
 
@@ -108,6 +109,11 @@ dp  = Dispatcher(storage=MemoryStorage())
 # - дублирование в истории
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+# ── Semaphore для фоновых задач: ограничивает параллелизм ─────────────────────
+# Предотвращает OOM/CPU spike при спаме сообщений:
+# memory extraction, emotional state, typing indicator — макс 10 параллельно
+_BG_SEMAPHORE = asyncio.Semaphore(10)
+
 # ── Sticker requests ──────────────────────────────────────────────────────────
 _sticker_warned_users: set[int] = set()
 
@@ -139,7 +145,14 @@ def _log_task_exception(task: asyncio.Task) -> None:
 
 
 def _create_background_task(coro) -> asyncio.Task:
-    task = asyncio.create_task(coro)
+    """Создаёт фоновую задачу с ограничением параллелизма через семафор."""
+    async def wrapped():
+        async with _BG_SEMAPHORE:
+            try:
+                await coro
+            except Exception as exc:
+                log.error("BG task error: %s", exc)
+    task = asyncio.create_task(wrapped())
     task.add_done_callback(_log_task_exception)
     return task
 

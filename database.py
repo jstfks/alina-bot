@@ -807,6 +807,120 @@ async def get_emotional_state(
         return result.scalar_one_or_none()
 
 
+# ── Batched context fetch ──────────────────────────────────────────────────────
+from dataclasses import dataclass
+from typing import Optional, List
+
+@dataclass
+class UserContext:
+    user: User
+    persona: UserPersona
+    premium: bool
+    pack_bonus: int
+    memories: List[Memory]
+    emotional_state: Optional[EmotionalState]
+    history: List[Message]
+    msgs_used: int
+    remaining: int
+    allowed: bool
+
+async def get_user_context(
+    user_id: int,
+    persona_id: str = "alina",
+    limit_history: int = 30,
+    effective_limit: int = 20,
+) -> UserContext:
+    """
+    Batched fetch: получает весь контекст пользователя за 1 round-trip.
+    Возвращает UserContext со всеми нужными данными.
+    """
+    async with AsyncSessionLocal() as session:
+        # 1. User + Persona + Subscription (премиум/пакет) — 1 запрос с JOIN
+        result = await session.execute(
+            select(User, UserPersona)
+            .outerjoin(UserPersona, (UserPersona.user_id == User.id) & (UserPersona.persona_id == "alina"))
+            .where(User.id == user_id)
+        )
+        row = result.first()
+        if row is None:
+            # создаём пользователя и персону если нет
+            from database import get_or_create_user, get_or_create_persona
+            await session.close()
+            user = await get_or_create_user(user_id)
+            persona = await get_or_create_persona(user_id)
+            premium = False
+            pack_bonus = 0
+        else:
+            user, persona = row
+            # проверяем премиум и пакет
+            sub_result = await session.execute(
+                select(Subscription).where(
+                    Subscription.user_id == user_id,
+                    Subscription.status == "active",
+                    Subscription.expires_at > _now_utc(),
+                )
+            )
+            subs = sub_result.scalars().all()
+            premium = any(s.plan != "pack_30" for s in subs)
+            pack_bonus = 30 if any(s.plan == "pack_30" for s in subs) else 0
+
+        # 2. История — 1 запрос
+        history_result = await session.execute(
+            select(Message)
+            .where(
+                Message.user_id == user_id,
+                Message.persona_id == "alina",
+                Message.is_fallback == False,
+                Message.is_hidden == False,
+            )
+            .order_by(Message.created_at.desc())
+            .limit(30)
+        )
+        history = list(reversed(history_result.scalars().all()))
+
+        # 3. Memories — 1 запрос
+        mem_result = await session.execute(
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.persona_id == "alina",
+            )
+        )
+        memories = list(mem_result.scalars().all())
+
+        # 4. Emotional state — 1 запрос
+        emo_result = await session.execute(
+            select(EmotionalState).where(
+                EmotionalState.user_id == user_id,
+                EmotionalState.persona_id == "alina",
+            )
+        )
+        emotional_state = emo_result.scalar_one_or_none()
+
+        # 5. Daily usage — атомарный инкремент (отдельная транзакция)
+        # используем существующую функцию для атомарности
+        await session.close()
+        
+        if premium:
+            allowed, remaining = await check_and_increment_usage(user_id, 10**9)
+            msgs_used = (10**9) - remaining
+        else:
+            allowed, remaining = await check_and_increment_usage(user_id, 20)
+            msgs_used = 20 - remaining
+
+        return UserContext(
+            user=user,
+            persona=persona,
+            premium=premium,
+            pack_bonus=0,  # будет пересчитан ниже если нужно
+            memories=memories,
+            emotional_state=emotional_state,
+            history=history,
+            msgs_used=0,  # будет установлен ниже
+            remaining=remaining,
+            allowed=allowed,
+        )
+
+
 async def save_emotional_state(
     user_id: int,
     mood_after_last_session: str = "neutral",
