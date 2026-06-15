@@ -111,14 +111,15 @@ class UserPersona(Base):
         Index("ix_user_persona_user_id", "user_id"),
     )
 
-    id                 = Column(Integer, primary_key=True, autoincrement=True)
-    user_id            = Column(BigInteger, nullable=False)
-    persona_id         = Column(String(50), default="alina", nullable=False)
-    relationship_level = Column(Integer, default=1, nullable=False)
-    relationship_score = Column(Float, default=0.0, nullable=False)
-    is_active          = Column(Boolean, default=True, nullable=False)
-    created_at         = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    last_interaction   = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    id                         = Column(Integer, primary_key=True, autoincrement=True)
+    user_id                    = Column(BigInteger, nullable=False)
+    persona_id                 = Column(String(50), default="alina", nullable=False)
+    relationship_level         = Column(Integer, default=1, nullable=False)
+    relationship_score         = Column(Float, default=0.0, nullable=False)
+    is_active                  = Column(Boolean, default=True, nullable=False)
+    created_at                 = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_interaction           = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    paywall_shown_level3       = Column(Boolean, default=False, nullable=False)  # atomic flag для апселла на уровне 3
 
 
 class Memory(Base):
@@ -219,6 +220,8 @@ async def init_db() -> None:
                ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN NOT NULL DEFAULT FALSE""",
             """ALTER TABLE subscriptions
                ADD COLUMN IF NOT EXISTS telegram_charge_id VARCHAR(100) DEFAULT NULL""",
+            """ALTER TABLE user_personas
+               ADD COLUMN IF NOT EXISTS paywall_shown_level3 BOOLEAN NOT NULL DEFAULT FALSE""",
 
             # ── Уникальные constraints (нужны для ON CONFLICT по имени) ──
             # user_personas
@@ -687,6 +690,13 @@ async def activate_subscription(
         await session.commit()
         log.info("Subscription activated: user=%s plan=%s days=%d", user_id, plan, days)
 
+        # Инвалидируем кэш премиум-статуса
+        try:
+            from cache import on_subscription_changed
+            await on_subscription_changed(user_id)
+        except Exception as exc:
+            log.warning("Не удалось инвалидировать кэш премиум-статуса для user=%s: %s", user_id, exc)
+
 
 # ── Relationship ──────────────────────────────────────────────────────────────
 
@@ -724,6 +734,30 @@ async def update_relationship(
 
         await session.commit()
         return persona.relationship_level
+
+
+async def mark_paywall_shown_level3(user_id: int, persona_id: str = "alina") -> bool:
+    """
+    Atomic-но помечает, что апселл на уровне 3 уже показан.
+    Возвращает True если пометка была установлена, False если уже была True.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(UserPersona).where(
+                UserPersona.user_id == user_id,
+                UserPersona.persona_id == persona_id,
+            ).with_for_update()
+        )
+        persona = result.scalar_one_or_none()
+        if persona is None:
+            return False
+
+        if persona.paywall_shown_level3:
+            return False
+
+        persona.paywall_shown_level3 = True
+        await session.commit()
+        return True
 
 
 # ── Emotional state ───────────────────────────────────────────────────────────

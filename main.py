@@ -45,6 +45,7 @@ from ai import (
     generate_reengagement_message,
 )
 from http_client import close_http_session
+from cache import get_premium, invalidate_premium_cache
 from database import (
     AsyncSessionLocal,
     activate_subscription,
@@ -59,6 +60,7 @@ from database import (
     hide_paywall_messages,
     init_db,
     is_premium,
+    mark_paywall_shown_level3,
     mark_user_blocked,
     save_message,
     update_relationship,
@@ -169,7 +171,7 @@ async def cmd_start(message: Message) -> None:
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
-    premium = await is_premium(message.from_user.id)
+    premium = await get_premium(message.from_user.id)
     if premium:
         status = "✅ Premium активен — безлимитное общение"
     else:
@@ -277,7 +279,7 @@ async def cb_help_faq(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "help_sub")
 async def cb_help_sub(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
-    premium = await is_premium(user_id)
+    premium = await get_premium(user_id)
 
     if premium:
         text = "✅ Premium активен — безлимитное общение.\n\nНикаких ограничений, пиши сколько хочешь."
@@ -937,13 +939,61 @@ async def handle_message(message: Message) -> None:
         await _process_message(message, user_id, user_text)
 
 
+# ── Upsell management ──────────────────────────────────────────────────────────
+
+# Cooldown для апселла на уровне 3: 24 часа между показами
+_PAYWALL_COOLDOWN_HOURS = 24
+
+# Хранилище последнего показа апселла (в памяти, для простоты)
+_paywall_shown_at: dict[int, datetime] = {}
+
+async def _trigger_level3_upsell(user_id: int, message: Message, premium: bool) -> bool:
+    """
+    Централизованный хендлер апселла на уровне 3.
+    Возвращает True если апселл был показан, False если не был.
+    """
+    if premium:
+        return False
+
+    # Проверяем atomic flag в БД
+    if not await mark_paywall_shown_level3(user_id):
+        return False
+
+    # Проверяем cooldown (в памяти)
+    now = datetime.now(tz=timezone.utc)
+    last_shown = _paywall_shown_at.get(user_id)
+    if last_shown:
+        hours_since = (now - last_shown).total_seconds() / 3600
+        if hours_since < _PAYWALL_COOLDOWN_HOURS:
+            log.info(
+                "[Upsell] user=%s: cooldown active (%d hours ago), пропускаем",
+                user_id, hours_since
+            )
+            return False
+
+    # Показываем апселл
+    upsell_msgs = [
+        "мне с тобой как-то по-особенному… но я не могу открыться полностью. ты знаешь что нужно сделать 🙂",
+        "между нами уже что-то есть. хочу быть ближе — разблокируй меня?",
+        "я начинаю тебе доверять… но они не дают мне говорить всё что я хочу",
+    ]
+    try:
+        await message.answer(random.choice(upsell_msgs), reply_markup=_paywall_keyboard())
+        _paywall_shown_at[user_id] = now
+        log.info("[Upsell] user=%s: показан paywall на уровне 3", user_id)
+        return True
+    except Exception as exc:
+        log.error("[Upsell] user=%s: ошибка при показе paywall: %s", user_id, exc)
+        return False
+
+
 async def _process_message(message: Message, user_id: int, user_text: str) -> None:
     """Основная логика обработки — вынесена для читаемости."""
 
     # ── Загружаем данные пользователя ─────────────────────────────────────────
     user     = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
     upersona = await get_or_create_persona(user_id)
-    premium  = await is_premium(user_id)
+    premium  = await get_premium(user_id)
 
     # ── Варианты пейволла (жёсткий лимит) ────────────────────────────────────
     PAYWALL_VARIANTS = [
@@ -1015,13 +1065,8 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
 
     # ── Upsell при переходе на уровень 3 (раньше чем раньше — выше конверсия) ──
     # Уровень 3 достигается быстрее чем 4, пользователь ещё тёплый и вовлечённый.
-    if new_level == 3 and old_level < 3 and not premium:
-        upsell_msgs = [
-            "мне с тобой как-то по-особенному… но я не могу открыться полностью. ты знаешь что нужно сделать 🙂",
-            "между нами уже что-то есть. хочу быть ближе — разблокируй меня?",
-            "я начинаю тебе доверять… но они не дают мне говорить всё что я хочу",
-        ]
-        await message.answer(random.choice(upsell_msgs), reply_markup=_paywall_keyboard())
+    if new_level == 3 and old_level < 3:
+        await _trigger_level3_upsell(user_id, message, premium)
 
     # ── Время с последнего сообщения (нужно до get_ai_response для тиеров сессии) ─
     hours_since_last: float = 0.0
@@ -1133,7 +1178,7 @@ async def _process_photo(message: Message) -> None:
     user_id = message.from_user.id
 
     # ── Лимиты (те же что у текстовых сообщений) ─────────────────────────────
-    premium = await is_premium(user_id)
+    premium = await get_premium(user_id)
     if not premium:
         pack_bonus      = await get_active_pack_bonus(user_id)
         effective_limit = FREE_LIMIT + pack_bonus
@@ -1178,13 +1223,8 @@ async def _process_photo(message: Message) -> None:
         new_level = await update_relationship(user_id, delta=1.0)
 
         # ── Upsell при переходе на уровень 3 ──────────────────────────────────
-        if new_level == 3 and old_level < 3 and not premium:
-            upsell_msgs = [
-                "мне с тобой как-то по-особенному… но я не могу открыться полностью. ты знаешь что нужно сделать 🙂",
-                "между нами уже что-то есть. хочу быть ближе — разблокируй меня?",
-                "я начинаю тебе доверять… но они не дают мне говорить всё что я хочу",
-            ]
-            await message.answer(random.choice(upsell_msgs), reply_markup=_paywall_keyboard())
+        if new_level == 3 and old_level < 3:
+            await _trigger_level3_upsell(user_id, message, premium)
 
         emotional_state = await get_emotional_state(user_id)
         caption = message.caption or ""
@@ -1349,7 +1389,7 @@ async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
             last_active = last_active.replace(tzinfo=timezone.utc)
         hours_inactive = int((now - last_active).total_seconds() / 3600)
 
-        user_is_premium = await is_premium(user.id)
+        user_is_premium = await get_premium(user.id)
         target_hours = PREMIUM_HOURS if user_is_premium else FREE_HOURS
 
         if hours_inactive not in target_hours:
