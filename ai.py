@@ -1,4 +1,4 @@
-"""
+﻿"""
 ai.py — Генерация AI-ответов с цепочкой провайдеров. v3.1
 
 v3.1 (code cleanup):
@@ -46,21 +46,20 @@ DEEPSEEK_MODEL = "deepseek-chat"
 GEMINI_MODEL   = "gemini-2.5-flash"
 
 OPENROUTER_FALLBACK_MODELS = [
-    "openrouter/owl-alpha",                          # приоритет — stealth frontier
-    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",                          # тест nsfw
-    "google/gemini-2.0-flash-001",                   # пока приоритет 2 
-    "anthropic/claude-3.7-sonnet",                   # пока приоритет 3
-    "nousresearch/hermes-3-llama-3.1-405b:free",     # 405B, отлично держит персонажей + nsfw
-    "z-ai/glm-4.5-air:free",                         # GLM 4.5 Air — сильный на русском
-    "openai/gpt-oss-120b:free",                      # 117B MoE, сильный но с content filters
-    "google/gemma-4-26b-a4b-it:free",                # Gemma 4 26B MoE — резерв
+    "openrouter/owl-alpha",                     # приоритет — stealth frontier
+    "z-ai/glm-4.5-air:free",                    # приоритет 2 GLM 4.5 Air — сильный на русском
+    "openrouter/auto",                          # приоритет 3 — автовыбор
+    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",  # тест nsfw   
+    "nousresearch/hermes-3-llama-3.1-405b:free", # 405B, отлично держит персонажей + nsfw
+    "openai/gpt-oss-120b:free",                 # 117B MoE, сильный но с content filters
+    "google/gemma-4-26b-a4b-it:free",           # Gemma 4 26B MoE — резерв
 ]
 
 VISION_FALLBACK_MODELS = [
+    "openrouter/auto",                             # автовыбор лучшей доступной vision-модели
     "qwen/qwen2.5-vl-72b-instruct:free",           # приоритет 1 — Qwen VL 72B
     "qwen/qwen2.5-vl-32b-instruct",                # приоритет 2 — Qwen VL 32B
     "google/gemma-4-31b-it:free",                  # приоритет 3 — Gemma 4 31B
-    "mistralai/pixtral-12b",                       # приоритет 4 — Pixtral 12B
     "google/gemma-4-26b-a4b-it:free",              # резерв
     "moonshotai/kimi-k2.6:free",                   # резерв
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",  # резерв
@@ -849,3 +848,4 @@ async def generate_reengagement_message(
     ]
     result = await _route_and_call(messages, max_tokens=120, temperature=0.85)
     return result or random.choice(examples)
+
