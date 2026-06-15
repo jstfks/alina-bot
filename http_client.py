@@ -31,9 +31,15 @@ async def get_http_session() -> aiohttp.ClientSession:
         return _http_session
     async with _http_session_lock:
         if _http_session is None or _http_session.closed:
-            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+            connector = aiohttp.TCPConnector(
+                limit=50,               # макс. одновременных соединений всего
+                limit_per_host=20,      # макс. на один хост (openrouter.ai)
+                ttl_dns_cache=300,      # DNS кэш 5 мин
+                keepalive_timeout=30,   # keep-alive 30 сек
+                enable_cleanup_closed=True,
+            )
             _http_session = aiohttp.ClientSession(connector=connector)
-            log.debug("HTTP session создана")
+            log.debug("HTTP session создана (pool: limit=50, per_host=20)")
     return _http_session
 
 
