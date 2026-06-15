@@ -711,11 +711,11 @@ async def update_relationship(
         persona.last_interaction = _now_utc()
 
         score = persona.relationship_score
-        if score >= 1500:
+        if score >= 1125:
             persona.relationship_level = 5
-        elif score >= 800:
+        elif score >= 600:
             persona.relationship_level = 4
-        elif score >= 400:
+        elif score >= 300:
             persona.relationship_level = 3
         elif score >= 150:
             persona.relationship_level = 2
