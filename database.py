@@ -571,13 +571,13 @@ async def check_and_increment_usage(
     - Если есть и sent < limit → UPDATE messages_sent += 1
     - Если есть и sent >= limit → DO NOTHING, читаем текущее значение
 
-    Используем advisory lock чтобы гарантировать атомарность
-    проверки + инкремента без гонки в случае первого сообщения.
+    Advisory lock берётся ПЕРЕД SELECT, чтобы исключить гонку:
+    две параллельные транзакции не могут одновременно прочитать sent=0
+    и обе пройти проверку sent >= limit.
     """
     today = _today_moscow()
     async with AsyncSessionLocal() as session:
-        # Advisory lock per (user_id, date) — гарантирует, что только
-        # одна транзакция одновременно модифицирует счётчик этого пользователя.
+        # Advisory lock per (user_id, date) — берём ДО чтения БД.
         # hashtext — PostgreSQL функция, дающая int4 от строки.
         lock_key = f"{user_id}:{today}"
         await session.execute(
@@ -707,7 +707,7 @@ async def update_relationship(
         if persona is None:
             return 1
 
-        persona.relationship_score = max(0.0, persona.relationship_score + delta)
+        persona.relationship_score = min(10000.0, max(0.0, persona.relationship_score + delta))
         persona.last_interaction = _now_utc()
 
         score = persona.relationship_score
