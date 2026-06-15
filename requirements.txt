@@ -7,3 +7,4 @@ sqlalchemy==2.0.35      # ORM + async engine
 asyncpg==0.29.0         # PostgreSQL async driver
 python-dotenv==1.0.1    # .env file loading
 apscheduler==3.10.4     # Periodic job scheduling
+redis==5.0.1            # Redis async client for caching
