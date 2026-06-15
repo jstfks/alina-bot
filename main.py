@@ -52,6 +52,7 @@ from database import (
     activate_subscription,
     check_and_increment_usage,
     check_daily_limit,
+    get_active_pack_bonus,
     get_emotional_state,
     get_history,
     get_memories,
