@@ -1513,7 +1513,11 @@ async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
 # ── Metrics & Health handlers ────────────────────────────────────────────────
 
 async def metrics_handler(request):
-    return web.Response(body=generate_latest(), content_type=CONTENT_TYPE_LATEST)
+    try:
+        return web.Response(body=generate_latest(), content_type=CONTENT_TYPE_LATEST)
+    except Exception as e:
+        log.error("Metrics handler error", error=str(e), exc_info=True)
+        return web.Response(status=500, text=f"Metrics error: {e}")
 
 async def health_handler(request):
     return web.json_response({"status": "ok"})
