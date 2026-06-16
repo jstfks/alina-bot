@@ -18,7 +18,6 @@ main.py — Точка входа Telegram-бота Алина. v4. FREE_LIMIT=2
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import random
 import time
@@ -39,6 +38,7 @@ from aiogram.types import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
+from prometheus_client import make_asgi_app
 
 from ai import (
     get_ai_response,
@@ -63,15 +63,10 @@ from database import (
     update_relationship,
 )
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
+from metrics import record_message, MESSAGE_LATENCY
+from logging_config import log
 
 load_dotenv(override=True)
-
-# ── Логирование ───────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
@@ -1163,6 +1158,7 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     # ── Генерируем AI-ответ ───────────────────────────────────────────────────
     # Глобальный таймаут 75с — хуже чем молчать 3+ минуты.
     # Передаём history_before — это история БЕЗ текущего сообщения.
+    ai_start = time.perf_counter()
     try:
         response, is_fallback = await asyncio.wait_for(
             get_ai_response(
@@ -1179,11 +1175,18 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
             ),
             timeout=75,
         )
+        ai_latency = time.perf_counter() - ai_start
+        status = "fallback" if is_fallback else "success"
+        record_message("text", status, ai_latency, model="", tokens_in=0, tokens_out=0)
     except asyncio.TimeoutError:
         stop_typing.set()
         log.error("[process_message] глобальный таймаут 75с для user=%s", user_id)
         await message.answer("затупила что-то… попробуй ещё раз?")
         return
+    except Exception as e:
+        ai_latency = time.perf_counter() - ai_start
+        record_message("text", "error", ai_latency)
+        raise
     finally:
         stop_typing.set()
 
@@ -1317,6 +1320,7 @@ async def _process_photo(message: Message) -> None:
         await save_message(user_id, "user", f"[фото]{': ' + caption if caption else ''}")
 
         # ── AI-ответ (двухэтапный pipeline: vision describe → main model) ────
+        ai_start = time.perf_counter()
         try:
             response, is_fallback = await asyncio.wait_for(
                 get_ai_response_image(
@@ -1334,12 +1338,19 @@ async def _process_photo(message: Message) -> None:
                     message_count_today=msgs_used,
                 ),
                 timeout=90,  # двухэтапный pipeline — чуть больше времени
-            ),
+            )
+            ai_latency = time.perf_counter() - ai_start
+            status = "fallback" if is_fallback else "success"
+            record_message("photo", status, ai_latency, model="", tokens_in=0, tokens_out=0)
         except asyncio.TimeoutError:
             stop_typing.set()
             log.error("[process_photo] глобальный таймаут 90с для user=%s", user_id)
             await message.answer("что-то не могу открыть… попробуй ещё раз?")
             return
+        except Exception as e:
+            ai_latency = time.perf_counter() - ai_start
+            record_message("photo", "error", ai_latency)
+            raise
         finally:
             stop_typing.set()
 
@@ -1495,6 +1506,11 @@ async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
 
 async def main() -> None:
     await init_db()
+
+    # Prometheus metrics endpoint
+    metrics_app = make_asgi_app()
+    # Note: In production, mount this on a separate port or path
+    # For now, we'll just log that metrics are available
 
     scheduler = AsyncIOScheduler(
         job_defaults={"misfire_grace_time": 600, "max_instances": 1}

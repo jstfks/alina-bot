@@ -1,0 +1,124 @@
+groups:
+- name: alina-bot
+  interval: 30s
+  rules:
+  # High message latency
+  - alert: HighMessageLatency
+    expr: |
+      histogram_quantile(0.95, sum(rate(alina_message_latency_seconds_bucket[5m])) by (le, type)) > 10
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High message latency (P95 > 10s)"
+      description: "P95 latency for {{ $labels.type }} is {{ $value }}s"
+
+  - alert: HighMessageLatencyCritical
+    expr: |
+      histogram_quantile(0.99, sum(rate(alina_message_latency_seconds_bucket[5m])) by (le, type)) > 30
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Critical message latency (P99 > 30s)"
+      description: "P99 latency for {{ $labels.type }} is {{ $value }}s"
+
+  # High fallback rate
+  - alert: HighFallbackRate
+    expr: |
+      sum(rate(alina_messages_total{status="fallback"}[5m])) 
+      / sum(rate(alina_messages_total[5m])) > 0.05
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High fallback rate (> 5%)"
+      description: "Fallback rate is {{ $value | humanizePercentage }}"
+
+  - alert: HighFallbackRateCritical
+    expr: |
+      sum(rate(alina_messages_total{status="fallback"}[5m])) 
+      / sum(rate(alina_messages_total[5m])) > 0.15
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Critical fallback rate (> 15%)"
+      description: "Fallback rate is {{ $value | humanizePercentage }} - LLM providers failing"
+
+  # High error rate
+  - alert: HighErrorRate
+    expr: |
+      sum(rate(alina_messages_total{status="error"}[5m])) 
+      / sum(rate(alina_messages_total[5m])) > 0.02
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High error rate (> 2%)"
+      description: "Error rate is {{ $value | humanizePercentage }}"
+
+  # LLM errors spike
+  - alert: LLMEErrorsSpike
+    expr: |
+      sum(rate(alina_llm_errors_total[5m])) > 10
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      summary: "LLM errors spike (> 10/min)"
+      description: "{{ $value }} LLM errors per minute"
+
+  # LLM providers down
+  - alert: LLMProvidersDown
+    expr: |
+      sum(rate(alina_llm_tokens_total[5m])) == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "All LLM providers down - no tokens generated"
+
+  # High DB latency
+  - alert: HighDBLatency
+    expr: |
+      histogram_quantile(0.95, sum(rate(alina_db_latency_seconds_bucket[5m])) by (le, operation)) > 1
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High DB latency (P95 > 1s)"
+      description: "P95 DB latency for {{ $labels.operation }} is {{ $value }}s"
+
+  # Background queue backlog
+  - alert: BGQueueBacklog
+    expr: |
+      alina_bg_queue_size > 100
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Background queue backlog (> 100)"
+      description: "Background queue size is {{ $value }}"
+
+  # No active users (possible bot down)
+  - alert: NoActiveUsers
+    expr: |
+      alina_active_users == 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "No active users for 10 minutes"
+      description: "Possible bot downtime or issues"
+
+  # DB pool exhaustion
+  - alert: DBPoolExhausted
+    expr: |
+      alina_db_pool_usage{pool="used"} / alina_db_pool_usage{pool="total"} > 0.9
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "DB pool > 90% utilized"
+      description: "Database connection pool is {{ $value | humanizePercentage }} full"
