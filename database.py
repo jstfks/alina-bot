@@ -28,6 +28,9 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime, timezone, timedelta
+
+# Константы (дублируются из main.py для избежания циклических импортов)
+FREE_LIMIT = 20
 from typing import Optional, Tuple
 
 from sqlalchemy import (
