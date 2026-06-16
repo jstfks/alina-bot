@@ -189,6 +189,12 @@ async def cmd_menu(message: Message) -> None:
         "/help — помощь"
     )
 
+# ── /health ────────────────────────────────────────────────────────────────────
+
+@dp.message(Command("health"))
+async def cmd_health(message: Message) -> None:
+    await message.answer("OK")
+
 # ── /help — интерактивное меню помощи ────────────────────────────────────────
 
 _HELP_TEXT_MAIN = (
