@@ -1514,7 +1514,11 @@ async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
 
 async def metrics_handler(request):
     try:
-        return web.Response(body=generate_latest(), content_type=CONTENT_TYPE_LATEST)
+        return web.Response(
+            body=generate_latest(),
+            content_type="text/plain; version=0.0.4",
+            charset="utf-8"
+        )
     except Exception as e:
         log.error("Metrics handler error", error=str(e), exc_info=True)
         return web.Response(status=500, text=f"Metrics error: {e}")
