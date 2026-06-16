@@ -844,8 +844,8 @@ async def get_user_context(
         row = result.first()
         if row is None:
             # создаём пользователя и персону если нет
+            # используем существующие функции (создают свои сессии)
             from database import get_or_create_user, get_or_create_persona
-            await session.close()
             user = await get_or_create_user(user_id)
             persona = await get_or_create_persona(user_id)
             premium = False
@@ -896,29 +896,27 @@ async def get_user_context(
         )
         emotional_state = emo_result.scalar_one_or_none()
 
-        # 5. Daily usage — атомарный инкремент (отдельная транзакция)
-        # используем существующую функцию для атомарности
-        await session.close()
-        
-        if premium:
-            allowed, remaining = await check_and_increment_usage(user_id, 10**9)
-            msgs_used = (10**9) - remaining
-        else:
-            allowed, remaining = await check_and_increment_usage(user_id, 20)
-            msgs_used = 20 - remaining
+    # 5. Daily usage — атомарный инкремент (отдельная транзакция)
+    # используем существующую функцию для атомарности (создаёт свою сессию)
+    if premium:
+        allowed, remaining = await check_and_increment_usage(user_id, 10**9)
+        msgs_used = (10**9) - remaining
+    else:
+        allowed, remaining = await check_and_increment_usage(user_id, 20)
+        msgs_used = 20 - remaining
 
-        return UserContext(
-            user=user,
-            persona=persona,
-            premium=premium,
-            pack_bonus=0,  # будет пересчитан ниже если нужно
-            memories=memories,
-            emotional_state=emotional_state,
-            history=history,
-            msgs_used=0,  # будет установлен ниже
-            remaining=remaining,
-            allowed=allowed,
-        )
+    return UserContext(
+        user=user,
+        persona=persona,
+        premium=premium,
+        pack_bonus=pack_bonus,
+        memories=memories,
+        emotional_state=emotional_state,
+        history=history,
+        msgs_used=msgs_used,
+        remaining=remaining,
+        allowed=allowed,
+    )
 
 
 async def save_emotional_state(

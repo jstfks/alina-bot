@@ -58,7 +58,6 @@ from database import (
     get_memories,
     get_or_create_persona,
     get_or_create_user,
-    get_user_context,
     hide_paywall_messages,
     init_db,
     is_premium,
@@ -67,7 +66,6 @@ from database import (
     save_message,
     set_relationship_level,
     update_relationship,
-    UserContext,
 )
 from memory import extract_emotional_state, extract_memories, update_hours_since_message
 
@@ -544,8 +542,8 @@ async def cb_select_plan(cb: CallbackQuery) -> None:
         await cb.message.edit_reply_markup(
             reply_markup=_payment_method_keyboard(tariff)
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Failed to edit reply markup: %s", exc)
     await cb.answer()
 
 
@@ -560,8 +558,8 @@ async def cb_confirm_pay(cb: CallbackQuery) -> None:
     # Убираем кнопки из сообщения — инвойс уже летит, нечего нажимать повторно
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Failed to edit reply markup: %s", exc)
     await cb.answer()
     await _fire_invoice(plan_key, cb.message.chat.id, cb.message.answer)
 
@@ -579,8 +577,8 @@ async def cb_back_to_plans(cb: CallbackQuery) -> None:
         await cb.message.edit_reply_markup(
             reply_markup=_paywall_keyboard(back_button=from_help)
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Failed to edit reply markup: %s", exc)
     await cb.answer()
 
 # ── Legacy /pay_* команды (обратная совместимость) ────────────────────────────
@@ -740,8 +738,8 @@ async def _typing_loop(chat_id: int, stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             await bot.send_chat_action(chat_id, "typing")
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Typing indicator error: %s", exc)
         try:
             await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=4)
         except asyncio.TimeoutError:
