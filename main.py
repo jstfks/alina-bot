@@ -24,6 +24,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
@@ -38,7 +39,7 @@ from aiogram.types import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from prometheus_client import make_asgi_app
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from ai import (
     get_ai_response,
@@ -1509,15 +1510,31 @@ async def check_inactive_users(scheduler: AsyncIOScheduler) -> None:
         )
 
 
+# ── Metrics & Health handlers ────────────────────────────────────────────────
+
+async def metrics_handler(request):
+    return web.Response(body=generate_latest(), content_type=CONTENT_TYPE_LATEST)
+
+async def health_handler(request):
+    return web.json_response({"status": "ok"})
+
+
 # ── Запуск ────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     await init_db()
 
-    # Prometheus metrics endpoint
-    metrics_app = make_asgi_app()
-    # Note: In production, mount this on a separate port or path
-    # For now, we'll just log that metrics are available
+    # Prometheus metrics web server
+    metrics_app = web.Application()
+    metrics_app.router.add_get("/metrics", metrics_handler)
+    metrics_app.router.add_get("/health", health_handler)
+
+    metrics_runner = web.AppRunner(metrics_app)
+    await metrics_runner.setup()
+    metrics_port = int(os.getenv("METRICS_PORT", "8001"))
+    site = web.TCPSite(metrics_runner, "0.0.0.0", metrics_port)
+    await site.start()
+    log.info(f"Metrics server started on :{metrics_port}/metrics")
 
     scheduler = AsyncIOScheduler(
         job_defaults={"misfire_grace_time": 600, "max_instances": 1}
@@ -1537,6 +1554,7 @@ async def main() -> None:
     finally:
         scheduler.shutdown(wait=False)
         await close_http_session()
+        await metrics_runner.cleanup()
         log.info("Бот остановлен корректно")
 
 
