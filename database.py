@@ -811,6 +811,8 @@ async def get_emotional_state(
 from dataclasses import dataclass
 from typing import Optional, List
 
+__all__ = ["UserContext", "get_user_context"]
+
 @dataclass
 class UserContext:
     user: User
@@ -828,7 +830,6 @@ async def get_user_context(
     user_id: int,
     persona_id: str = "alina",
     limit_history: int = 30,
-    effective_limit: int = 20,
 ) -> UserContext:
     """
     Batched fetch: получает весь контекст пользователя за 1 round-trip.
@@ -899,11 +900,12 @@ async def get_user_context(
     # 5. Daily usage — атомарный инкремент (отдельная транзакция)
     # используем существующую функцию для атомарности (создаёт свою сессию)
     if premium:
-        allowed, remaining = await check_and_increment_usage(user_id, 10**9)
-        msgs_used = (10**9) - remaining
+        limit = 10**9
     else:
-        allowed, remaining = await check_and_increment_usage(user_id, 20)
-        msgs_used = 20 - remaining
+        limit = FREE_LIMIT + pack_bonus  # FREE_LIMIT=20 + pack_bonus(0 или 30)
+    
+    allowed, remaining = await check_and_increment_usage(user_id, limit)
+    msgs_used = limit - remaining
 
     return UserContext(
         user=user,

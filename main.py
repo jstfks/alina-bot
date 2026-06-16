@@ -52,10 +52,7 @@ from database import (
     activate_subscription,
     check_and_increment_usage,
     check_daily_limit,
-    get_active_pack_bonus,
-    get_emotional_state,
     get_history,
-    get_memories,
     get_or_create_persona,
     get_or_create_user,
     hide_paywall_messages,
@@ -1066,10 +1063,11 @@ async def _trigger_level3_upsell(user_id: int, message: Message, premium: bool) 
 async def _process_message(message: Message, user_id: int, user_text: str) -> None:
     """Основная логика обработки — вынесена для читаемости."""
 
-    # ── Загружаем данные пользователя ─────────────────────────────────────────
-    user     = await get_or_create_user(user_id, message.from_user.username, message.from_user.first_name)
-    upersona = await get_or_create_persona(user_id)
-    premium  = await get_premium(user_id)
+    # ── Загружаем весь контекст пользователя одним батчем ───────────────────────
+    ctx = await get_user_context(user_id)
+    user = ctx.user
+    upersona = ctx.persona
+    premium = ctx.premium
 
     # ── Варианты пейволла (жёсткий лимит) ────────────────────────────────────
     PAYWALL_VARIANTS = [
@@ -1089,7 +1087,7 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
 
     # ── Варианты мягкого предупреждения (вшиваются в конец ответа) ────────────
     SOFT_LIMIT_VARIANTS = [
-        "у нас осталось буквально пара фраз, я уже вижу как экран блокировки подмигивает. договорим или оставим интригу?",
+        "у нас осталось буквально пару фраз, я уже вижу как экран блокировки подмигивает. договорим или оставим интригу?",
         "чувствую, что мы подходим к черте. буквы на сегодня заканчиваются — буквально два сообщения, и наступит пауза. успеешь сказать главное?",
         "тут вылезло предупреждение о лимите, у нас осталось от силы два ответа. не люблю, когда диалог прерывают искусственно, но имеем что имеем…",
         "мы, кажется, доходим до лимита сообщений. ещё шаг-два, и нас заблокирует до оплаты. ненавижу когда всё обрывается на полуслове, так что пиши точнее.",
@@ -1098,43 +1096,37 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     SOFT_LIMIT = 15  # мягкое предупреждение за N сообщений до стены
     soft_warning: str = ""  # будет вшит в конец ответа если сработал
 
-    if not premium:
-        # Пакет сообщений увеличивает эффективный лимит на 30
-        pack_bonus   = await get_active_pack_bonus(user_id)
-        effective_limit = FREE_LIMIT + pack_bonus
+    # Лимиты и счетчики уже посчитаны в get_user_context
+    allowed = ctx.allowed
+    remaining = ctx.remaining
+    msgs_used = ctx.msgs_used
+    pack_bonus = ctx.pack_bonus
 
-        allowed, remaining = await check_and_increment_usage(user_id, effective_limit)
-        if not allowed:
+    if not premium:
+        effective_limit = FREE_LIMIT + ctx.pack_bonus
+        # ctx.allowed и ctx.remaining уже установлены в get_user_context
+        if not ctx.allowed:
             # ── Жёсткий лимит ─────────────────────────────────────────────────
             variant = random.choice(PAYWALL_VARIANTS)
             await message.answer(variant["text"], reply_markup=_paywall_keyboard())
             await save_message(user_id, "assistant", variant["text"])
             return
-        # ── Мягкий лимит — запоминаем текст, вошьём в конец ответа ──────────
-        msgs_used = effective_limit - remaining
+        msgs_used = ctx.msgs_used
         if msgs_used == SOFT_LIMIT:
             soft_warning = random.choice(SOFT_LIMIT_VARIANTS)
     else:
-        # У Premium нет лимита, но нам всё равно нужен реальный счётчик
-        # сообщений за сегодня — он используется для session arc
-        # (build_session_arc / build_context_layers), чтобы тон ответа
-        # развивался по ходу разговора, а не оставался "ранней стадией"
-        # для всех premium-сообщений.
-        # check_and_increment_usage с огромным лимитом не блокирует,
-        # но честно инкрементирует и возвращает остаток.
-        _, remaining_virtual = await check_and_increment_usage(user_id, 10**9)
-        msgs_used = (10**9) - remaining_virtual
+        msgs_used = ctx.msgs_used
 
-    # ── Загружаем историю ДО save_message — она нужна для memory extraction ───
-    # ВАЖНО: загружаем историю здесь, до сохранения текущего сообщения.
-    # Это даёт нам "историю до текущего обмена" без хрупкой логики history[:-1].
-    history_before = await get_history(user_id, limit=30)
-    history_count  = len(history_before)  # реальное число сообщений для % логики
+    # ── История и память уже загружены в контексте ────────────────────────────
+    history_before = ctx.history
+    history_count = len(history_before)
+    memories = ctx.memories
+    emotional_state = ctx.emotional_state
 
     # ── Обновляем уровень отношений ───────────────────────────────────────────
     old_level = upersona.relationship_level
-    msg_len   = len(user_text)
-    delta     = 2.5 if msg_len > 150 else 1.8 if msg_len > 80 else 1.3 if msg_len > 40 else 1.0
+    msg_len = len(user_text)
+    delta = 2.5 if msg_len > 150 else 1.8 if msg_len > 80 else 1.3 if msg_len > 40 else 1.0
 
     # new_level — свежее значение из DB, не stale upersona.relationship_level
     new_level = await update_relationship(user_id, delta)
@@ -1160,16 +1152,15 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     _create_background_task(_typing_loop(message.chat.id, stop_typing))
 
     # ── Имя пользователя ──────────────────────────────────────────────────────
-    memories  = await get_memories(user_id)
-    user_name = next((m.value for m in memories if m.key == "name"), None)
+    user_name = next((m.value for m in ctx.memories if m.key == "name"), None)
     if not user_name:
         user_name = user.user_name_given or message.from_user.first_name or ""
 
     # ── Сохраняем входящее сообщение ─────────────────────────────────────────
     await save_message(user_id, "user", user_text)
 
-    # ── Эмоциональное состояние ───────────────────────────────────────────────
-    emotional_state = await get_emotional_state(user_id)
+    # Эмоциональное состояние уже загружено в контексте
+    emotional_state = ctx.emotional_state
 
     # ── Генерируем AI-ответ ───────────────────────────────────────────────────
     # Глобальный таймаут 75с — хуже чем молчать 3+ минуты.
@@ -1253,13 +1244,19 @@ async def handle_photo(message: Message) -> None:
 async def _process_photo(message: Message) -> None:
     user_id = message.from_user.id
 
+    # ── Загружаем весь контекст пользователя одним батчем ───────────────────────
+    ctx = await get_user_context(user_id)
+    user = ctx.user
+    upersona = ctx.persona
+    premium = ctx.premium
+    allowed = ctx.allowed
+    remaining = ctx.remaining
+    msgs_used = ctx.msgs_used
+    pack_bonus = ctx.pack_bonus
+
     # ── Лимиты (те же что у текстовых сообщений) ─────────────────────────────
-    premium = await get_premium(user_id)
     if not premium:
-        pack_bonus      = await get_active_pack_bonus(user_id)
-        effective_limit = FREE_LIMIT + pack_bonus
-        allowed, remaining = await check_and_increment_usage(user_id, effective_limit)
-        if not allowed:
+        if not ctx.allowed:
             limit_msg = random.choice([
                 "подожди — они правда обрывают нас прямо сейчас?",
                 "хочу говорить ещё. но мне говорят что на сегодня всё.",
@@ -1268,10 +1265,9 @@ async def _process_photo(message: Message) -> None:
             ])
             await message.answer(limit_msg)
             return
-        msgs_used = effective_limit - remaining
+        msgs_used = ctx.msgs_used
     else:
-        _, remaining_virtual = await check_and_increment_usage(user_id, 10**9)
-        msgs_used = (10**9) - remaining_virtual
+        msgs_used = ctx.msgs_used
 
     # ── Typing loop ───────────────────────────────────────────────────────────
     stop_typing = asyncio.Event()
@@ -1286,13 +1282,13 @@ async def _process_photo(message: Message) -> None:
         image_b64 = base64.b64encode(content.read()).decode("utf-8")
         mime_type = "image/jpeg"
 
-        # ── Контекст пользователя ─────────────────────────────────────────────
-        upersona  = await get_or_create_persona(user_id)
-        user      = await get_or_create_user(user_id)
-        memories  = await get_memories(user_id)
-        user_name = next((m.value for m in memories if m.key == "name"), None)
+        # ── Контекст пользователя уже загружен в контексте ─────────────────────
+        upersona = ctx.persona
+        user = ctx.user
+        memories = ctx.memories
+        user_name = next((m.value for m in ctx.memories if m.key == "name"), None)
         if not user_name:
-            user_name = user.user_name_given or message.from_user.first_name or ""
+            user_name = ctx.user.user_name_given or message.from_user.first_name or ""
 
         # ── Обновляем уровень отношений (фиксированная дельта для фото) ──────
         old_level = upersona.relationship_level
@@ -1302,11 +1298,11 @@ async def _process_photo(message: Message) -> None:
         if new_level == 3 and old_level < 3:
             await _trigger_level3_upsell(user_id, message, premium)
 
-        emotional_state = await get_emotional_state(user_id)
+        emotional_state = ctx.emotional_state
         caption = message.caption or ""
 
         # ── История для контекста (основная модель будет отвечать с историей) ──
-        history_before = await get_history(user_id, limit=30)
+        history_before = ctx.history
 
         # ── Время с последнего сообщения ─────────────────────────────────────
         hours_since_last: float = 0.0
@@ -1332,15 +1328,15 @@ async def _process_photo(message: Message) -> None:
                     caption=caption,
                     user_name=user_name,
                     relationship_level=new_level,
-                    memories=memories,
-                    history=history_before,
+                    memories=ctx.memories,
+                    history=ctx.history,
                     is_premium=premium,
-                    emotional_state=emotional_state,
+                    emotional_state=ctx.emotional_state,
                     hours_since_last=hours_since_last,
                     message_count_today=msgs_used,
                 ),
                 timeout=90,  # двухэтапный pipeline — чуть больше времени
-            )
+            ),
         except asyncio.TimeoutError:
             stop_typing.set()
             log.error("[process_photo] глобальный таймаут 90с для user=%s", user_id)
