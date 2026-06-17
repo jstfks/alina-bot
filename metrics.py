@@ -79,6 +79,9 @@ GRAFANA_CLOUD_PROMETHEUS_URL = os.getenv("GRAFANA_CLOUD_PROMETHEUS_URL")
 GRAFANA_CLOUD_USER = os.getenv("GRAFANA_CLOUD_USER")
 GRAFANA_CLOUD_API_KEY = os.getenv("GRAFANA_CLOUD_API_KEY")
 
+# Import log from logging_config to avoid circular imports
+from logging_config import log
+
 def _push_metrics_periodically():
     """Background task to push metrics to Grafana Cloud."""
     if not (GRAFANA_CLOUD_PROMETHEUS_URL and GRAFANA_CLOUD_USER and GRAFANA_CLOUD_API_KEY):
@@ -98,12 +101,14 @@ def _push_metrics_periodically():
 
     while True:
         try:
+            # push_to_gateway doesn't accept username/password kwargs
+            # Use basic auth via the URL or use the auth parameter
+            # Format: push_to_gateway(gateway, job, registry, auth=(username, password))
             push_to_gateway(
                 url,
                 job="alina-bot",
                 registry=REGISTRY,
-                username=GRAFANA_CLOUD_USER,
-                password=GRAFANA_CLOUD_API_KEY,
+                auth=(GRAFANA_CLOUD_USER, GRAFANA_CLOUD_API_KEY),
             )
             log.info("Metrics pushed to Grafana Cloud")
         except Exception as e:
