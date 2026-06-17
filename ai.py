@@ -79,9 +79,13 @@ async def _call_deepseek(
     messages: list[dict],
     max_tokens: int,
     temperature: float,
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str], int, int, int]:
+    """
+    Returns: (text, model_name, prompt_tokens, completion_tokens, total_tokens)
+    Returns (None, None, 0, 0, 0) on failure.
+    """
     if not DEEPSEEK_API_KEY:
-        return None
+        return None, None, 0, 0, 0
     session = await get_http_session()
     try:
         async with session.post(
@@ -100,7 +104,7 @@ async def _call_deepseek(
         ) as resp:
             if _is_rate_limited(resp.status):
                 log.warning("[DeepSeek] rate-limited (%s)", resp.status)
-                return None
+                return None, None, 0, 0, 0
             data = await resp.json()
             if "choices" not in data:
                 err = data.get("error", {})
@@ -108,24 +112,36 @@ async def _call_deepseek(
                     log.error("[DeepSeek] БАЛАНС КОНЧИЛСЯ — пополните счёт на platform.deepseek.com")
                 else:
                     log.warning("[DeepSeek] неожиданный ответ: %s", err)
-                return None
+                return None, None, 0, 0, 0
             text = data["choices"][0]["message"]["content"].strip()
-            return text or None
+            
+            # Extract token usage from DeepSeek response
+            usage = data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", 0)
+            
+            log.info("[DeepSeek] успех: %s (tokens: %d)", DEEPSEEK_MODEL, total_tokens)
+            return text, DEEPSEEK_MODEL, prompt_tokens, completion_tokens, total_tokens
     except asyncio.TimeoutError:
         log.warning("[DeepSeek] timeout")
-        return None
+        return None, None, 0, 0, 0
     except Exception as exc:
         log.warning("[DeepSeek] исключение: %s", exc)
-        return None
+        return None, None, 0, 0, 0
 
 
 async def _call_gemini(
     messages: list[dict],
     max_tokens: int,
     temperature: float,
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str], int, int, int]:
+    """
+    Returns: (text, model_name, prompt_tokens, completion_tokens, total_tokens)
+    Returns (None, None, 0, 0, 0) on failure.
+    """
     if not GEMINI_API_KEY:
-        return None
+        return None, None, 0, 0, 0
 
     system_prompt = ""
     gemini_messages: list[dict] = []
@@ -147,7 +163,7 @@ async def _call_gemini(
             deduped.append(m)
 
     if not deduped or deduped[0]["role"] != "user":
-        return None
+        return None, None, 0, 0, 0
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -173,19 +189,27 @@ async def _call_gemini(
         ) as resp:
             if _is_rate_limited(resp.status):
                 log.warning("[Gemini] rate-limited (%s)", resp.status)
-                return None
+                return None, None, 0, 0, 0
             data = await resp.json()
             if "candidates" not in data:
                 log.warning("[Gemini] неожиданный ответ: %s", data.get("error"))
-                return None
+                return None, None, 0, 0, 0
             text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return text or None
+            
+            # Extract token usage from Gemini response
+            usage = data.get("usageMetadata", {})
+            prompt_tokens = usage.get("promptTokenCount", 0)
+            completion_tokens = usage.get("candidatesTokenCount", 0)
+            total_tokens = usage.get("totalTokenCount", 0)
+            
+            log.info("[Gemini] успех: %s (tokens: %d)", GEMINI_MODEL, total_tokens)
+            return text, GEMINI_MODEL, prompt_tokens, completion_tokens, total_tokens
     except asyncio.TimeoutError:
         log.warning("[Gemini] timeout")
-        return None
+        return None, None, 0, 0, 0
     except Exception as exc:
         log.warning("[Gemini] исключение: %s", exc)
-        return None
+        return None, None, 0, 0, 0
 
 
 def _strip_think_tags(text: str) -> str:
@@ -361,11 +385,12 @@ async def get_ai_response_image(
     emotional_state=None,
     hours_since_last: float = 0.0,
     message_count_today: int = 0,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str, int, int, int]:
     """
     Двухэтапный pipeline для фото:
     1. Vision-модель описывает изображение фактически
     2. Основная модель отвечает голосом Алины
+    Возвращает: (response_text, is_fallback, model_name, prompt_tokens, completion_tokens, total_tokens)
     """
     description = await get_image_description(image_b64, mime_type, caption)
 
@@ -379,7 +404,7 @@ async def get_ai_response_image(
         log.warning("[Image pipeline] vision недоступна для user=%s, реагируем на факт фото", user_id)
         user_message = caption if caption else "[прислал фото, но описание недоступно]"
 
-    return await get_ai_response(
+    response_text, is_fallback, model_name, prompt_tokens, completion_tokens, total_tokens = await get_ai_response(
         user_id=user_id,
         user_message=user_message,
         history=history,
@@ -391,25 +416,28 @@ async def get_ai_response_image(
         emotional_state=emotional_state,
         hours_since_last=hours_since_last,
     )
+    return response_text, is_fallback, model_name, prompt_tokens, completion_tokens, total_tokens
 
-
-# ── Цепочка провайдеров ───────────────────────────────────────────────────────
 
 async def _route_and_call(
     messages: list[dict],
     max_tokens: int = 300,
     temperature: float = 0.92,
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str], int, int, int]:
+    """
+    Returns: (text, model_name, prompt_tokens, completion_tokens, total_tokens)
+    Returns (None, None, 0, 0, 0) on failure.
+    """
     # 1. OpenRouter (7 моделей, Owl Alpha первым)
-    result = await _call_openrouter(messages, max_tokens, temperature)
-    if result:
-        return result
+    text, model, prompt_tokens, completion_tokens, total_tokens = await _call_openrouter(messages, max_tokens, temperature)
+    if text:
+        return text, model, prompt_tokens, completion_tokens, total_tokens
     log.info("[route] OpenRouter недоступен → Gemini")
 
     # 2. Gemini
-    result = await _call_gemini(messages, max_tokens, temperature)
-    if result:
-        return result
+    text, model, prompt_tokens, completion_tokens, total_tokens = await _call_gemini(messages, max_tokens, temperature)
+    if text:
+        return text, model, prompt_tokens, completion_tokens, total_tokens
     log.info("[route] Gemini недоступен → DeepSeek")
 
     # 3. DeepSeek
@@ -760,9 +788,9 @@ async def get_ai_response(
     is_premium: bool = False,
     emotional_state=None,
     hours_since_last: float = 0.0,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str, int, int, int]:
     """
-    Возвращает (response_text, is_fallback).
+    Возвращает (response_text, is_fallback, model_name, prompt_tokens, completion_tokens, total_tokens).
     is_fallback=True означает что все провайдеры упали — ответ не надо
     сохранять в историю и не надо считать за "реальный обмен".
     """
@@ -787,13 +815,15 @@ async def get_ai_response(
     messages.extend(_history_to_messages(tiered_history))
     messages.append({"role": "user", "content": user_message[:4000]})
 
-    result = await _route_and_call(messages, temperature=arc_temperature)
+    response_text, model_name, prompt_tokens, completion_tokens, total_tokens = await _route_and_call(
+        messages, temperature=arc_temperature
+    )
     if result:
         result = _split_paragraphs(result)
-        return result, False
+        return result, False, model_name, prompt_tokens, completion_tokens, total_tokens
 
     log.error("Все AI-провайдеры недоступны для user=%s", user_id)
-    return random.choice(FALLBACK_RESPONSES), True
+    return random.choice(FALLBACK_RESPONSES), True, "", 0, 0, 0
 
 
 async def generate_reengagement_message(

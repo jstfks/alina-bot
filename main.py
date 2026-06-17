@@ -1169,7 +1169,7 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
     # Передаём history_before — это история БЕЗ текущего сообщения.
     ai_start = time.perf_counter()
     try:
-        response, is_fallback = await asyncio.wait_for(
+        response, is_fallback, model_name, prompt_tokens, completion_tokens, total_tokens = await asyncio.wait_for(
             get_ai_response(
                 user_id             = user_id,
                 user_message        = user_text,
@@ -1187,6 +1187,9 @@ async def _process_message(message: Message, user_id: int, user_text: str) -> No
         ai_latency = time.perf_counter() - ai_start
         status = "fallback" if is_fallback else "success"
         record_message("text", status, ai_latency, model="", tokens_in=0, tokens_out=0)
+        # Record token usage from AI response
+        if total_tokens > 0:
+            record_message("text", status, ai_latency, model="", tokens_in=prompt_tokens, tokens_out=completion_tokens)
     except asyncio.TimeoutError:
         stop_typing.set()
         log.error("[process_message] глобальный таймаут 75с для user=%s", user_id)
@@ -1331,7 +1334,7 @@ async def _process_photo(message: Message) -> None:
         # ── AI-ответ (двухэтапный pipeline: vision describe → main model) ────
         ai_start = time.perf_counter()
         try:
-            response, is_fallback = await asyncio.wait_for(
+            response, is_fallback, model_name, prompt_tokens, completion_tokens, total_tokens = await asyncio.wait_for(
                 get_ai_response_image(
                     user_id=user_id,
                     image_b64=image_b64,
@@ -1351,6 +1354,9 @@ async def _process_photo(message: Message) -> None:
             ai_latency = time.perf_counter() - ai_start
             status = "fallback" if is_fallback else "success"
             record_message("photo", status, ai_latency, model="", tokens_in=0, tokens_out=0)
+            # Record token usage from AI response
+            if total_tokens > 0:
+                record_message("photo", status, ai_latency, model="", tokens_in=prompt_tokens, tokens_out=completion_tokens)
         except asyncio.TimeoutError:
             stop_typing.set()
             log.error("[process_photo] глобальный таймаут 90с для user=%s", user_id)
