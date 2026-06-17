@@ -54,6 +54,7 @@ from database import (
     check_and_increment_usage,
     check_daily_limit,
     get_history,
+    get_or_create_user,
     get_user_context,
     hide_paywall_messages,
     init_db,
