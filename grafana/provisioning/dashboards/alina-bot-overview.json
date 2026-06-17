@@ -1,0 +1,165 @@
+{
+  "dashboard": {
+    "uid": "alina-bot-overview",
+    "title": "Alina Bot - Overview",
+    "tags": ["alina-bot", "overview"],
+    "timezone": "utc",
+    "refresh": "10s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Messages RPS",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "sum(rate(alina_messages_total[1m])) by (type, status)",
+            "legendFormat": "{{type}} - {{status}}",
+            "format": "time_series"
+          }
+        ],
+        "yAxes": [
+          {"format": "short", "label": "msg/s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Message Latency (P50/P95/P99)",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(alina_message_latency_seconds_bucket[5m])) by (le, type))",
+            "legendFormat": "P50 {{type}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(alina_message_latency_seconds_bucket[5m])) by (le, type))",
+            "legendFormat": "P95 {{type}}"
+          },
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(alina_message_latency_seconds_bucket[5m])) by (le, type))",
+            "legendFormat": "P99 {{type}}"
+          }
+        ],
+        "yAxes": [
+          {"format": "s", "label": "seconds"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "LLM Tokens (Input/Output)",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "sum(rate(alina_llm_tokens_total[5m])) by (model, direction)",
+            "legendFormat": "{{model}} {{direction}}",
+            "format": "time_series"
+          }
+        ],
+        "yAxes": [
+          {"format": "short", "label": "tokens/s"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 4,
+        "title": "LLM Errors by Provider",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "sum(rate(alina_llm_errors_total[5m])) by (provider, error_type)",
+            "legendFormat": "{{provider}} - {{error_type}}"
+          }
+        ],
+        "yAxes": [
+          {"format": "short", "label": "errors/min"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "DB Latency (P95)",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(alina_db_latency_seconds_bucket[5m])) by (le, operation))",
+            "legendFormat": "P95 {{operation}}"
+          }
+        ],
+        "yAxes": [
+          {"format": "s", "label": "seconds"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Active Users & BG Queue",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "alina_active_users",
+            "legendFormat": "Active Users"
+          },
+          {
+            "expr": "alina_bg_queue_size",
+            "legendFormat": "BG Queue Size"
+          }
+        ],
+        "yAxes": [
+          {"format": "short", "label": "count"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Fallback Rate",
+        "type": "graph",
+        "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "sum(rate(alina_messages_total{status=\"fallback\"}[5m])) / sum(rate(alina_messages_total[5m]))",
+            "legendFormat": "Fallback Rate"
+          }
+        ],
+        "yAxes": [
+          {"format": "percentunit", "label": "fallback rate"},
+          {"format": "short"}
+        ],
+        "alertThresholds": [
+          {"value": 0.05, "colorMode": "critical", "label": "Warning > 5%"},
+          {"value": 0.15, "colorMode": "critical", "label": "Critical > 15%"}
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Error Rate",
+        "type": "graph",
+        "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+        "targets": [
+          {
+            "expr": "sum(rate(alina_messages_total{status=\"error\"}[5m])) / sum(rate(alina_messages_total[5m]))",
+            "legendFormat": "Error Rate"
+          }
+        ],
+        "yAxes": [
+          {"format": "percentunit", "label": "error rate"},
+          {"format": "short"}
+        ],
+        "alertThresholds": [
+          {"value": 0.02, "colorMode": "critical", "label": "Critical > 2%"}
+        ]
+      }
+    ]
+  },
+  "overwrite": true
+}

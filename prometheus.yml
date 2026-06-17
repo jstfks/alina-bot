@@ -17,7 +17,7 @@ rule_files:
 scrape_configs:
   - job_name: 'alina-bot'
     static_configs:
-      - targets: ['alina-bot:8000']
+      - targets: ['alina-bot:8001']
         labels:
           service: 'alina-bot'
     metrics_path: '/metrics'

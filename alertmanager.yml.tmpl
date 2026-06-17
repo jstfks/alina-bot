@@ -1,0 +1,61 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'telegram'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'telegram-critical'
+      continue: true
+    - match:
+        severity: warning
+      receiver: 'telegram-warning'
+      group_wait: 1m
+      group_interval: 10m
+
+receivers:
+  - name: 'telegram'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        api_url: 'https://api.telegram.org'
+        chat_id: ${ADMIN_ID}
+        parse_mode: 'HTML'
+        message: |
+          <b>{{ .Status | upper }}</b>: {{ .GroupLabels.alertname }}
+          {{ range .Annotations.summary}}
+          {{description}}
+
+  - name: 'telegram-critical'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        api_url: 'https://api.telegram.org'
+        chat_id: ${ADMIN_ID}
+        parse_mode: 'HTML'
+        message: |
+          <b>🚨 CRITICAL: {{ .GroupLabels.alertname }}</b>
+          {{Annotations.summary}}
+          {{Annotations.description}}
+          <b>Labels:</b> {{range .GroupLabels.SortedPairs}} {{.Name}}={{.Value}} {{end}}
+
+  - name: 'telegram-warning'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        api_url: 'https://api.telegram.org'
+        chat_id: ${ADMIN_ID}
+        parse_mode: 'HTML'
+        message: |
+          <b>⚠️ WARNING: {{ .GroupLabels.alertname }}</b>
+          {{Annotations.summary}}
+          {{Annotations.description}}
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
